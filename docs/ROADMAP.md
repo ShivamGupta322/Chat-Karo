@@ -20,9 +20,10 @@ Learned in Phase 1 (carry into Phase 2):
   copy is the MAM archive in PostgreSQL. The real client should load room history via MAM (XEP-0313).
 
 ## Phase 2 — Web client foundation
-- [ ] Vite + React + TS + Tailwind scaffold, ESLint, Vitest
+- [x] Vite + React + TS + Tailwind scaffold, ESLint, Vitest (slice 2a)
 - [ ] `xmpp/` module: connect, reconnect with backoff, join/leave MUC, send/receive groupchat
-- [ ] Chat page: MessageList, Composer, OccupantList
+      (2a done: connect, join/leave, send/receive, nick-conflict retry, connection-lost; 2b: reconnect + MAM history)
+- [x] Chat page: MessageList, Composer, OccupantList (slice 2a)
 - [ ] `geo/useLocation` with permission/error states; dev-mode map location picker
 - **Demo:** client-side geohash → join room → chat (temporary, before geo_service)
 

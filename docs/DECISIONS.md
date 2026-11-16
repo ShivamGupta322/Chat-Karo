@@ -67,3 +67,25 @@ XMPP ports 5280/5222 bind to `127.0.0.1` by default (`XMPP_BIND_ADDR` opts in to
 **Consequences:** Smaller attack surface and no open sign-ups. Config values may not contain `"`, `\`,
 `{{`, `}}` or control characters — the entrypoint rejects them, and on failure prints only placeholder
 names, never config lines. Upgrading MongooseIM means re-diffing the template against the new image's default config.
+
+## ADR-008 — Web XMPP layer design
+**Status:** Accepted (Phase 2, slice 2a)
+**Context:** The web client needs a robust, testable XMPP layer, and components must never touch Strophe directly.
+**Decision:**
+- All XMPP logic lives in `web/src/xmpp/client.ts`, written against an `XmppTransport` interface. Strophe.js
+  3.1.1 is the only adapter (`xmpp/strophe/stropheTransport.ts`), and ESLint `no-restricted-imports` forbids
+  importing `strophe.js` anywhere else. Unit tests run the client against a fake transport with captured stanzas.
+- Strophe 3.1.1's source has Node-only `require('ws'/'jsdom')` fallbacks. The `stropheNodeShims` Vite
+  transform neutralises them. It is tied to the exact pin and warns if it stops matching after an upgrade.
+- React stays on 18.3.1 per ADR-003, so the map in 2c uses react-leaflet 4.x.
+- No optimistic rendering: the MUC echo is the source of truth for your own messages, so there are no duplicates.
+- Client-side instant-room creation (`xmpp/roomCreation.ts`, marked TEMPORARY) is removed in the Phase 3 MUC lock-down.
+- **MongooseIM 6.2.1 quirk:** self-presence status codes (110/201) arrive inside `<x xmlns="http://jabber.org/protocol/muc">`,
+  not `muc#user`, so the parser accepts both namespaces (never `jabber:x:data`). MUC messages carry `<stanza-id by=room>`.
+- Connection semantics: a user-initiated disconnect (button or `pagehide`) ends with no error. An unexpected drop
+  ends with `connection-lost`. This is the hook slice 2b uses for reconnect. A failed or replaced Strophe
+  connection is always closed, so sockets don't leak.
+- Vite `envDir: '..'` reads the repo-root `.env`. This is safe only because Vite exposes `VITE_*` variables alone,
+  so `envPrefix` must never be changed and `loadEnv(…, '')` must never be used.
+**Consequences:** The XMPP logic is fully unit-testable (138 tests in 2a). Upgrading Strophe means re-checking
+the shim warning and the status mapping in the adapter.

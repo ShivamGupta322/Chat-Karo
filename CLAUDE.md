@@ -59,7 +59,9 @@ cd geo_service && rebar3 eunit             # unit tests
 cd geo_service && rebar3 ct                # integration tests (needs mongo up)
 cd geo_service && rebar3 dialyzer          # type check — must be clean
 cd geo_service && rebar3 fmt --check       # formatting (erlfmt)
+cd web && npm ci                           # install client deps (first time)
 cd web && npm run dev                      # client dev server (http://localhost:5173)
+cd web && npm run build                    # typecheck + production build
 cd web && npm run test                     # Vitest
 cd web && npm run lint && npm run typecheck
 ```

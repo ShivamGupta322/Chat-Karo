@@ -53,7 +53,17 @@ node tools/xmpp-smoke/serve.mjs
 Open http://localhost:8000/?user=alice in one tab and http://localhost:8000/?user=bob in another, log in
 with `DEV_USER_PASSWORD` from `.env`, join `lobby@muc.chaterl.localhost` and chat.
 
-*(The React client in `web/` arrives in Phase 2.)*
+### Web client (dev)
+
+```bash
+cd web
+npm ci
+npm run dev      # http://localhost:5173
+```
+
+Log in as `alice@chaterl.localhost` with `DEV_USER_PASSWORD` from your own `.env`, then join the default
+room `lobby@muc.chaterl.localhost`. Open a private window as `bob` to chat between two users. Slice 2a
+has no reconnect, history or geolocation yet; the room JID is entered by hand.
 
 ## Project docs
 
