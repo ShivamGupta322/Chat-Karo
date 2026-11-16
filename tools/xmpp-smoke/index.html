@@ -1,0 +1,228 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>chatErl XMPP smoke test</title>
+  <!-- Phase 1 throwaway: proves MongooseIM + WebSocket + MUC work. The real client lives in web/. -->
+  <script src="https://cdn.jsdelivr.net/npm/strophe.js@1.6.2/dist/strophe.umd.min.js"
+          integrity="sha384-c4KozFWM5BlRsHqo85hdxUTr9BrcwPxSdugn7YBmEvPN1E6NRQK7BftkkKqnc44f"
+          crossorigin="anonymous"></script>
+  <style>
+    :root { --bg:#f6f7f9; --fg:#1b1f24; --muted:#5b6470; --card:#fff; --line:#d9dde3; --accent:#2563eb; --err:#b91c1c; }
+    @media (prefers-color-scheme: dark) { :root { --bg:#111418; --fg:#e6e9ee; --muted:#9aa4b1; --card:#1a1f25; --line:#2c333c; --accent:#60a5fa; --err:#f87171; } }
+    * { box-sizing: border-box; }
+    body { margin:0; font:15px/1.45 system-ui, sans-serif; background:var(--bg); color:var(--fg); }
+    main { max-width:760px; margin:0 auto; padding:16px; display:grid; gap:12px; }
+    h1 { font-size:1.2rem; margin:4px 0; }
+    section { background:var(--card); border:1px solid var(--line); border-radius:10px; padding:12px; }
+    form { display:flex; flex-wrap:wrap; gap:8px; align-items:end; }
+    label { display:grid; gap:2px; font-size:.8rem; color:var(--muted); flex:1 1 160px; }
+    input { font:inherit; padding:7px 9px; border:1px solid var(--line); border-radius:6px; background:var(--bg); color:var(--fg); width:100%; }
+    button { font:inherit; padding:7px 14px; border-radius:6px; border:1px solid var(--accent); background:var(--accent); color:#fff; cursor:pointer; }
+    button:disabled { opacity:.45; cursor:default; }
+    #status { font-size:.85rem; color:var(--muted); }
+    #status.err { color:var(--err); }
+    .chat { display:grid; grid-template-columns:1fr 160px; gap:12px; }
+    @media (max-width:560px) { .chat { grid-template-columns:1fr; } }
+    #log { height:300px; overflow-y:auto; margin:0; padding:0; list-style:none; display:grid; align-content:start; gap:4px; }
+    #log li { word-break:break-word; }
+    #log .nick { font-weight:600; }
+    #log .sys { color:var(--muted); font-style:italic; }
+    #occupants { margin:0; padding-left:18px; }
+    h2 { font-size:.85rem; margin:0 0 6px; color:var(--muted); text-transform:uppercase; letter-spacing:.04em; }
+  </style>
+</head>
+<body>
+<main>
+  <h1>chatErl — XMPP smoke test</h1>
+
+  <section aria-labelledby="conn-h">
+    <h2 id="conn-h">Connection</h2>
+    <form id="login">
+      <label>WebSocket URL <input id="ws" value="ws://localhost:5280/ws-xmpp" required></label>
+      <label>JID <input id="jid" autocomplete="username" required></label>
+      <label>Password <input id="pw" type="password" autocomplete="current-password" required></label>
+      <button id="connectBtn" type="submit">Connect</button>
+      <button id="disconnectBtn" type="button" disabled>Disconnect</button>
+    </form>
+    <p id="status" role="status" aria-live="polite">Disconnected</p>
+  </section>
+
+  <section aria-labelledby="room-h">
+    <h2 id="room-h">Room</h2>
+    <form id="joinForm">
+      <label>Room JID <input id="room" required></label>
+      <label>Nickname <input id="nick" required></label>
+      <button id="joinBtn" type="submit" disabled>Join</button>
+    </form>
+  </section>
+
+  <section class="chat" aria-label="Chat">
+    <div>
+      <h2>Messages</h2>
+      <ul id="log" aria-live="polite"></ul>
+      <form id="sendForm">
+        <label style="flex:1 1 auto">Message <input id="msg" maxlength="2000" autocomplete="off" required></label>
+        <button id="sendBtn" type="submit" disabled>Send</button>
+      </form>
+    </div>
+    <div>
+      <h2>Occupants</h2>
+      <ul id="occupants"></ul>
+    </div>
+  </section>
+</main>
+
+<script>
+  // Strophe 1.6 UMD exposes either globals or a `strophe` namespace, depending on the bundler.
+  const NS = window.strophe || window;
+  const { Strophe, $pres, $msg, $iq } = NS;
+  const NS_MUC = "http://jabber.org/protocol/muc";
+
+  const params = new URLSearchParams(location.search);
+  const domain = params.get("domain") || "chaterl.localhost";
+  const user = params.get("user") || "alice";
+  const $ = (id) => document.getElementById(id);
+  $("jid").value = `${user}@${domain}`;
+  $("room").value = `lobby@muc.${domain}`;
+  $("nick").value = user;
+
+  let conn = null;
+  let joinedRoom = null;
+  let joinedNick = null; // the nick we actually joined with (the input may have changed since)
+  const occupants = new Set();
+
+  function setStatus(text, isErr = false) {
+    $("status").textContent = text;
+    $("status").classList.toggle("err", isErr);
+  }
+  function addLine(nick, body, sys = false) {
+    const li = document.createElement("li");
+    if (sys) { li.className = "sys"; li.textContent = body; }
+    else {
+      const n = document.createElement("span"); n.className = "nick"; n.textContent = nick + ": ";
+      li.append(n, document.createTextNode(body));
+    }
+    $("log").append(li);
+    $("log").scrollTop = $("log").scrollHeight;
+  }
+  function renderOccupants() {
+    $("occupants").replaceChildren(...[...occupants].sort().map((n) => {
+      const li = document.createElement("li"); li.textContent = n; return li;
+    }));
+  }
+  function setConnected(on) {
+    $("connectBtn").disabled = on;
+    $("disconnectBtn").disabled = !on;
+    $("joinBtn").disabled = !on;
+    $("sendBtn").disabled = !on || !joinedRoom;
+  }
+
+  const STATUS = {
+    [Strophe.Status.CONNECTING]: "Connecting…",
+    [Strophe.Status.AUTHENTICATING]: "Authenticating…",
+    [Strophe.Status.CONNECTED]: "Connected",
+    [Strophe.Status.DISCONNECTING]: "Disconnecting…",
+    [Strophe.Status.DISCONNECTED]: "Disconnected",
+    [Strophe.Status.AUTHFAIL]: "Authentication failed — check JID/password",
+    [Strophe.Status.CONNFAIL]: "Connection failed — is MongooseIM running on port 5280?",
+    [Strophe.Status.ERROR]: "Error",
+  };
+
+  $("login").addEventListener("submit", (e) => {
+    e.preventDefault();
+    $("connectBtn").disabled = true; // prevent a second connection while this one is in progress
+    conn = new Strophe.Connection($("ws").value);
+    conn.connect($("jid").value, $("pw").value, (status, condition) => {
+      const failed = [Strophe.Status.AUTHFAIL, Strophe.Status.CONNFAIL, Strophe.Status.ERROR].includes(status);
+      setStatus((STATUS[status] || `Status ${status}`) + (condition ? ` (${condition})` : ""), failed);
+      if (status === Strophe.Status.CONNECTED) {
+        conn.addHandler(onPresence, null, "presence");
+        conn.addHandler(onMessage, null, "message", "groupchat");
+        conn.addHandler(onMessageError, null, "message", "error");
+        conn.send($pres());
+        setConnected(true);
+      } else if (status === Strophe.Status.DISCONNECTED || failed) {
+        joinedRoom = null; joinedNick = null; occupants.clear(); renderOccupants(); setConnected(false);
+      }
+    });
+  });
+
+  $("disconnectBtn").addEventListener("click", () => conn && conn.disconnect("user"));
+  // Close the stream cleanly on reload/close. Otherwise stream management keeps the old session
+  // resumable for a while and the nickname stays occupied (join fails with <conflict/>).
+  // disconnect() sends </close> over the WebSocket synchronously enough for pagehide.
+  window.addEventListener("pagehide", () => {
+    if (conn && conn.connected) conn.disconnect("page closed");
+  });
+
+  $("joinForm").addEventListener("submit", (e) => {
+    e.preventDefault();
+    if (joinedRoom) conn.send($pres({ to: `${joinedRoom}/${joinedNick}`, type: "unavailable" }));
+    joinedRoom = $("room").value.trim();
+    joinedNick = $("nick").value.trim();
+    occupants.clear(); renderOccupants();
+    $("log").replaceChildren();
+    // Ask for the last 20 messages of history on join.
+    conn.send($pres({ to: `${joinedRoom}/${joinedNick}` })
+      .c("x", { xmlns: NS_MUC }).c("history", { maxstanzas: "20" }));
+    addLine("", `Joining ${joinedRoom}…`, true);
+    setConnected(true);
+  });
+
+  $("sendForm").addEventListener("submit", (e) => {
+    e.preventDefault();
+    const body = $("msg").value.trim();
+    if (!body || !joinedRoom) return;
+    conn.send($msg({ to: joinedRoom, type: "groupchat" }).c("body").t(body));
+    $("msg").value = "";
+  });
+
+  function onPresence(p) {
+    const from = p.getAttribute("from") || "";
+    if (!joinedRoom || Strophe.getBareJidFromJid(from) !== joinedRoom) return true;
+    const nick = Strophe.getResourceFromJid(from);
+    const type = p.getAttribute("type");
+    const codes = [...p.getElementsByTagName("status")].map((s) => s.getAttribute("code"));
+    if (type === "error") {
+      addLine("", `Could not join: ${p.getElementsByTagName("error")[0]?.firstElementChild?.tagName || "error"}`, true);
+      joinedRoom = null; joinedNick = null; setConnected(true); // disables Send until a successful join
+      return true;
+    }
+    if (type === "unavailable") { occupants.delete(nick); addLine("", `${nick} left`, true); }
+    else {
+      if (!occupants.has(nick) && codes.includes("110")) addLine("", `Joined as ${nick}`, true);
+      else if (!occupants.has(nick)) addLine("", `${nick} joined`, true);
+      occupants.add(nick);
+      // 201 = we just created the room; accept the default config so it becomes an "instant room".
+      if (codes.includes("201")) {
+        conn.sendIQ($iq({ to: joinedRoom, type: "set" })
+          .c("query", { xmlns: NS_MUC + "#owner" }).c("x", { xmlns: "jabber:x:data", type: "submit" }));
+        addLine("", "Created new room (instant config accepted)", true);
+      }
+    }
+    renderOccupants();
+    return true;
+  }
+
+  function onMessageError(m) {
+    const cond = m.getElementsByTagName("error")[0]?.firstElementChild?.tagName || "unknown";
+    addLine("", `Message rejected: ${cond}`, true);
+    return true;
+  }
+
+  function onMessage(m) {
+    const from = m.getAttribute("from") || "";
+    if (Strophe.getBareJidFromJid(from) !== joinedRoom) return true;
+    const text = m.getElementsByTagName("body")[0]?.textContent?.trim();
+    if (!text) return true; // e.g. the room's subject message
+    const nick = Strophe.getResourceFromJid(from);
+    if (!nick) { addLine("", text, true); return true; } // sent by the room itself
+    const delayed = m.getElementsByTagName("delay").length > 0;
+    addLine(nick + (delayed ? " (history)" : ""), text);
+    return true;
+  }
+</script>
+</body>
+</html>

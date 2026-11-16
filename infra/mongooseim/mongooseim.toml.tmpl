@@ -1,0 +1,186 @@
+# MongooseIM 6.2.1 configuration for chatErl (local dev).
+# This is a TEMPLATE: {{PLACEHOLDERS}} are filled from environment variables by entrypoint.sh at
+# container start, so secrets stay in .env. Based on the image's default mongooseim.toml.
+# Docs: https://esl.github.io/MongooseDocs/6.2.1/configuration/configuration-files/
+
+[general]
+  loglevel = "warning"
+  hosts = ["{{XMPP_DOMAIN}}"]
+  default_server_domain = "{{XMPP_DOMAIN}}"
+  registration_timeout = "infinity"
+  language = "en"
+  max_fsm_queue = 1000
+
+# --- Listeners -----------------------------------------------------------------------------------
+
+# XMPP over WebSocket (RFC 7395) for the web client: ws://localhost:5280/ws-xmpp
+# In production, a TLS-terminating reverse proxy sits in front of this.
+[[listen.http]]
+  port = 5280
+  transport.num_acceptors = 10
+  transport.max_connections = 1024
+
+  [[listen.http.handlers.mod_websockets]]
+    host = "_"
+    path = "/ws-xmpp"
+
+# Admin GraphQL API for geo_service (user registration, room management).
+# Bound on all interfaces INSIDE the Docker network only — the port is not published to the host.
+[[listen.http]]
+  ip_address = "0.0.0.0"
+  port = 5551
+  transport.num_acceptors = 10
+  transport.max_connections = 1024
+
+  [[listen.http.handlers.mongoose_graphql_handler]]
+    host = "_"
+    path = "/api/graphql"
+    schema_endpoint = "admin"
+    username = "{{MONGOOSEIM_ADMIN_USER}}"
+    password = "{{MONGOOSEIM_ADMIN_PASSWORD}}"
+
+# Plain TCP c2s, handy for testing with desktop XMPP clients (Gajim, Dino).
+[[listen.c2s]]
+  port = 5222
+  access = "c2s"
+  shaper = "c2s_shaper"
+  max_stanza_size = 65536
+  tls.verify_mode = "none"
+  tls.certfile = "priv/ssl/fake_server.pem"
+
+# --- Auth & storage ------------------------------------------------------------------------------
+
+[auth]
+  password.format = "scram"
+
+  [auth.rdbms]
+
+[internal_databases.mnesia]
+
+[outgoing_pools.rdbms.default]
+  scope = "global"
+  workers = 5
+
+  [outgoing_pools.rdbms.default.connection]
+    driver = "pgsql"
+    host = "{{POSTGRES_HOST}}"
+    database = "{{POSTGRES_DB}}"
+    username = "{{POSTGRES_USER}}"
+    password = "{{POSTGRES_PASSWORD}}"
+
+# Don't send anonymous usage metrics to the MongooseIM maintainers.
+[services.service_mongoose_system_metrics]
+  report = false
+
+# --- Modules -------------------------------------------------------------------------------------
+# No mod_register: accounts are created by geo_service via the admin API, never in-band.
+
+[modules.mod_disco]
+  users_can_see_hidden_services = false
+
+[modules.mod_stream_management]
+
+[modules.mod_presence]
+
+[modules.mod_muc]
+  host = "muc.@HOST@"
+  access = "muc"
+  access_create = "muc_create"
+  backend = "rdbms"
+  default_room.persistent = true
+  default_room.public = true
+
+[modules.mod_mam]
+  backend = "rdbms"
+
+  [modules.mod_mam.muc]
+    host = "muc.@HOST@"
+
+# --- Shapers, ACL, access rules ------------------------------------------------------------------
+
+[shaper.normal]
+  max_rate = 1000
+
+[shaper.fast]
+  max_rate = 50_000
+
+[shaper.mam_shaper]
+  max_rate = 1
+
+[shaper.mam_global_shaper]
+  max_rate = 1000
+
+[acl]
+  local = [{}]
+
+[access]
+  max_user_sessions = [
+    {acl = "all", value = 10}
+  ]
+
+  max_user_offline_messages = [
+    {acl = "admin", value = 5000},
+    {acl = "all", value = 100}
+  ]
+
+  local = [
+    {acl = "local", value = "allow"}
+  ]
+
+  c2s = [
+    {acl = "blocked", value = "deny"},
+    {acl = "all", value = "allow"}
+  ]
+
+  c2s_shaper = [
+    {acl = "admin", value = "none"},
+    {acl = "all", value = "normal"}
+  ]
+
+  muc_admin = [
+    {acl = "admin", value = "allow"}
+  ]
+
+  muc_create = [
+    {acl = "local", value = "allow"}
+  ]
+
+  muc = [
+    {acl = "all", value = "allow"}
+  ]
+
+  mam_set_prefs = [
+    {acl = "all", value = "default"}
+  ]
+
+  mam_get_prefs = [
+    {acl = "all", value = "default"}
+  ]
+
+  mam_lookup_messages = [
+    {acl = "all", value = "default"}
+  ]
+
+  mam_set_prefs_shaper = [
+    {acl = "all", value = "mam_shaper"}
+  ]
+
+  mam_get_prefs_shaper = [
+    {acl = "all", value = "mam_shaper"}
+  ]
+
+  mam_lookup_messages_shaper = [
+    {acl = "all", value = "mam_shaper"}
+  ]
+
+  mam_set_prefs_global_shaper = [
+    {acl = "all", value = "mam_global_shaper"}
+  ]
+
+  mam_get_prefs_global_shaper = [
+    {acl = "all", value = "mam_global_shaper"}
+  ]
+
+  mam_lookup_messages_global_shaper = [
+    {acl = "all", value = "mam_global_shaper"}
+  ]

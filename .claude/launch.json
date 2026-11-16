@@ -1,0 +1,11 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "xmpp-smoke",
+      "runtimeExecutable": "node",
+      "runtimeArgs": ["tools/xmpp-smoke/serve.mjs"],
+      "port": 8000
+    }
+  ]
+}

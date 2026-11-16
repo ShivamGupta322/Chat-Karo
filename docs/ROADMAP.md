@@ -1,0 +1,67 @@
+# Roadmap
+
+Solo build, phased so there's a working end-to-end demo as early as possible. Tick items as they land.
+Each phase ends with a short demo you could show someone.
+
+## Phase 1 — Infrastructure skeleton ✅ (2026-11-16)
+- [x] `docker-compose.yml` with MongooseIM 6.2.1, PostgreSQL 16, MongoDB 7 (healthchecks, named volumes)
+- [x] MongooseIM config: domain `chaterl.localhost`, `mod_muc`, `mod_websockets`, PostgreSQL auth/MAM
+- [x] Load MongooseIM PostgreSQL schema on first start
+- [x] MongoDB collections + indexes (`infra/mongo/init-indexes.js`)
+- [x] Test users + one MUC room (`infra/mongooseim/dev-seed.sh`); two tabs chatting via `tools/xmpp-smoke`
+- **Demo:** two tabs chatting through your own XMPP server
+
+Learned in Phase 1 (carry into Phase 2):
+- Stream management keeps a dropped session resumable (default 10 min), so a reload without a clean
+  disconnect leaves the old nickname in the room and rejoining fails with `<conflict/>`. The real client
+  must close the stream on `pagehide` *and* handle `conflict` (retry with a suffixed nick, or resume the session).
+- Messages from the room itself (no resource in `from`, e.g. the subject) must be handled separately.
+- MUC join `<history/>` is held in memory by mod_muc and is lost when MongooseIM restarts; the durable
+  copy is the MAM archive in PostgreSQL. The real client should load room history via MAM (XEP-0313).
+
+## Phase 2 — Web client foundation
+- [ ] Vite + React + TS + Tailwind scaffold, ESLint, Vitest
+- [ ] `xmpp/` module: connect, reconnect with backoff, join/leave MUC, send/receive groupchat
+- [ ] Chat page: MessageList, Composer, OccupantList
+- [ ] `geo/useLocation` with permission/error states; dev-mode map location picker
+- **Demo:** client-side geohash → join room → chat (temporary, before geo_service)
+
+## Phase 3 — geo_service
+- [ ] rebar3 app, supervision tree, sys.config, Dockerfile
+- [ ] `geohash` module with EUnit + PropEr tests (encode/decode round-trip, neighbours)
+- [ ] Cowboy: `/api/health`, `/api/session`, `/api/locate`
+- [ ] MongoDB pool + `geo_store`; `init-indexes.js`
+- [ ] MongooseIM admin API integration: register users
+- [ ] Lock down MUC: `default_room.public = false` (a public disco listing of geohash rooms would reveal
+      which cells are active, a location leak) and restrict room creation to geo_service/admin
+- [ ] Client switches to `/api/locate` for room assignment
+- **Demo:** rooms assigned by the server, recorded in MongoDB
+
+## Phase 4 — Room lifecycle & movement
+- [ ] `geo_room` process per active cell with idle shutdown under `geo_room_sup`
+- [ ] Client hysteresis + automatic room switching + "you entered …" notice
+- [ ] `geo_rate`: token bucket + impossible-jump rejection
+- [ ] Ephemeral history: MAM limited to last 24 h; idle rooms TTL'd in MongoDB
+- **Demo:** walk (or drag the dev pin) across cells and watch rooms switch
+
+## Phase 5 — Differentiators
+- [ ] Range slider (Block / Neighborhood / Area)
+- [ ] Named places: seed script + `/api/places` + place-labelled rooms
+- [ ] Rich presence statuses
+- [ ] Moderation: block, report, mute room, per-room slow mode
+- **Demo:** the full product story
+
+## Phase 6 — Polish & ship
+- [ ] Deploy (single VPS + Docker Compose + Caddy for TLS)
+- [ ] README with architecture diagram, screenshots, demo GIF, live link
+- [ ] CI (GitHub Actions): rebar3 eunit/ct/dialyzer, npm lint/typecheck/test
+- [ ] Production hardening: random Erlang distribution cookie (`CLUSTER_COOKIE`), TLS-only XMPP behind
+      the reverse proxy, real certificates instead of the image's fake ones
+- [ ] Greeter bot for cold start
+- **Demo:** public URL on your resume
+
+## Stretch
+- [ ] Map heat-view of activity
+- [ ] Pinned messages / polls
+- [ ] Neighbour-cell reading mode
+- [ ] Federation between two MongooseIM nodes

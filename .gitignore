@@ -1,0 +1,27 @@
+# Secrets
+.env
+*.pem
+*.key
+
+# Erlang / rebar3
+geo_service/_build/
+geo_service/rebar3.crashdump
+geo_service/*.plt
+erl_crash.dump
+
+# Node / web
+web/node_modules/
+web/dist/
+web/coverage/
+
+# Docker volumes
+data/
+
+# Editors / OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# Claude Code local settings
+.claude/settings.local.json

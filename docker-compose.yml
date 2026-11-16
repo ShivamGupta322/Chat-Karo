@@ -1,0 +1,76 @@
+name: chaterl
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB}
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+    volumes:
+      - pg_data:/var/lib/postgresql/data
+      # Runs once, on first init of an empty volume: MongooseIM 6.2.1 schema (copied from the image's priv/pg.sql)
+      - ./infra/postgres:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    restart: unless-stopped
+
+  mongo:
+    image: mongo:7
+    environment:
+      MONGO_INITDB_DATABASE: ${MONGO_DB}
+    volumes:
+      - mongo_data:/data/db
+      # Runs once, on first init of an empty volume: collections + indexes
+      - ./infra/mongo:/docker-entrypoint-initdb.d:ro
+    ports:
+      # localhost only, for MongoDB Compass / mongosh. 27018 avoids clashing with a locally installed MongoDB.
+      - "127.0.0.1:${MONGO_HOST_PORT:-27018}:27017"
+    healthcheck:
+      test: ["CMD", "mongosh", "--quiet", "--eval", "db.adminCommand('ping').ok"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+    restart: unless-stopped
+
+  mongooseim:
+    image: mongooseim/mongooseim:6.2.1
+    hostname: mongooseim
+    entrypoint: ["bash", "/templates/entrypoint.sh"]
+    environment:
+      XMPP_DOMAIN: ${XMPP_DOMAIN}
+      POSTGRES_HOST: postgres
+      POSTGRES_DB: ${POSTGRES_DB}
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      MONGOOSEIM_ADMIN_USER: ${MONGOOSEIM_ADMIN_USER}
+      MONGOOSEIM_ADMIN_PASSWORD: ${MONGOOSEIM_ADMIN_PASSWORD}
+      JOIN_CLUSTER: "false"        # single node; skip the image's auto-clustering logic
+    volumes:
+      - ./infra/mongooseim/mongooseim.toml.tmpl:/templates/mongooseim.toml.tmpl:ro
+      - ./infra/mongooseim/entrypoint.sh:/templates/entrypoint.sh:ro
+      - mim_data:/var/lib/mongooseim
+    ports:
+      # localhost only by default. Set XMPP_BIND_ADDR=0.0.0.0 in .env to test from a phone on your LAN
+      # (plaintext — dev only).
+      - "${XMPP_BIND_ADDR:-127.0.0.1}:5280:5280"   # XMPP over WebSocket (/ws-xmpp)
+      - "${XMPP_BIND_ADDR:-127.0.0.1}:5222:5222"   # XMPP c2s (desktop clients)
+      # 5551 (admin GraphQL) is intentionally NOT published; geo_service reaches it on the Docker network.
+    depends_on:
+      postgres:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "mongooseimctl", "status"]
+      interval: 10s
+      timeout: 10s
+      retries: 30
+      start_period: 20s
+    restart: unless-stopped
+
+volumes:
+  pg_data:
+  mongo_data:
+  mim_data:
