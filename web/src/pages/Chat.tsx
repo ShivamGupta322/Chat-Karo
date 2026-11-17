@@ -1,21 +1,22 @@
-import { AppHeader } from '../components/AppHeader';
-import { Composer } from '../components/Composer';
-import { MessageList } from '../components/MessageList';
-import { OccupantList } from '../components/OccupantList';
-import { RoomForm } from '../components/RoomForm';
-import { useRoomStore } from '../state/room';
-import { useSessionStore } from '../state/session';
-import { roomLabel } from '../ui/addresses';
-import { describeJoinFailure } from '../ui/text';
-import { localpartOf, useXmppClient } from '../xmpp';
+import { AppHeader } from "../components/AppHeader";
+import { ConnectionBanner } from "../components/ConnectionBanner";
+import { Composer } from "../components/Composer";
+import { MessageList } from "../components/MessageList";
+import { OccupantList } from "../components/OccupantList";
+import { RoomForm } from "../components/RoomForm";
+import { useRoomStore } from "../state/room";
+import { selectSessionJid, useSessionStore } from "../state/session";
+import { roomLabel } from "../ui/addresses";
+import { CONNECTION_TEXT, describeJoinFailure } from "../ui/text";
+import { localpartOf, useXmppClient } from "../xmpp";
 
 export function Chat({ mucDomain }: { mucDomain: string }): React.JSX.Element {
   const client = useXmppClient();
   const connection = useSessionStore((s) => s.connection);
   const room = useRoomStore();
-  const jid = connection.status === 'connected' ? connection.jid : '';
-  const joined = room.status === 'joined' && room.roomJid !== null;
-  const label = room.roomJid === null ? '' : roomLabel(room.roomJid);
+  const jid = selectSessionJid(connection) ?? "";
+  const joined = room.status === "joined" && room.roomJid !== null;
+  const label = room.roomJid === null ? "" : roomLabel(room.roomJid);
 
   return (
     <div className="flex min-h-dvh flex-col">
@@ -25,6 +26,14 @@ export function Chat({ mucDomain }: { mucDomain: string }): React.JSX.Element {
           client.disconnect();
         }}
       />
+      {connection.status === "reconnecting" && (
+        <ConnectionBanner
+          state={connection}
+          onRetryNow={() => {
+            client.wake("user");
+          }}
+        />
+      )}
       <main className="mx-auto grid w-full max-w-5xl gap-3 p-3 sm:p-4 md:grid-cols-[1fr_16rem] md:items-start">
         <div className="grid min-w-0 gap-3">
           <RoomForm
@@ -41,19 +50,24 @@ export function Chat({ mucDomain }: { mucDomain: string }): React.JSX.Element {
           />
 
           <p role="status" className="m-0 text-sm text-ink-muted">
-            {room.status === 'joining' && (
+            {room.status === "joining" && (
               <>
-                Joining <strong className="font-semibold text-ink">{label}</strong>…
+                Joining{" "}
+                <strong className="font-semibold text-ink">{label}</strong>…
               </>
             )}
-            {room.status === 'joined' && (
+            {room.status === "joined" && (
               <>
-                You're in <strong className="font-semibold text-ink">{label}</strong> as{' '}
-                {room.nick ?? ''}
+                You're in{" "}
+                <strong className="font-semibold text-ink">{label}</strong> as{" "}
+                {room.nick ?? ""}
               </>
             )}
-            {room.status === 'failed' && room.failure && describeJoinFailure(room.failure.reason)}
-            {room.status === 'left' && 'You left the room'}
+            {room.status === "failed" &&
+              room.failure &&
+              describeJoinFailure(room.failure.reason)}
+            {room.status === "left" && "You left the room"}
+            {room.status === "reconnecting" && CONNECTION_TEXT.roomReconnecting}
           </p>
 
           <section
@@ -62,14 +76,20 @@ export function Chat({ mucDomain }: { mucDomain: string }): React.JSX.Element {
           >
             <MessageList
               items={room.timeline}
-              emptyText={joined ? 'No messages yet. Say hello!' : 'Join a room to start chatting.'}
+              emptyText={
+                joined
+                  ? "No messages yet. Say hello!"
+                  : room.status === "reconnecting"
+                    ? CONNECTION_TEXT.roomReconnectingEmpty
+                    : "Join a room to start chatting."
+              }
             />
             <div className="border-t border-line p-3 sm:p-4">
               <Composer
                 disabled={!joined}
                 onSend={(body) =>
                   room.roomJid === null
-                    ? { ok: false, error: 'not-joined' }
+                    ? { ok: false, error: "not-joined" }
                     : client.sendGroupchat(room.roomJid, body)
                 }
               />

@@ -10,7 +10,7 @@ export function installPageHideClose(
 ): () => void {
   const onHide = (): void => {
     const s = client.getState().status;
-    if (s === 'connected' || s === 'connecting') client.disconnect();
+    if (s === 'connected' || s === 'connecting' || s === 'reconnecting') client.disconnect();
   };
   target.addEventListener('pagehide', onHide);
   return () => {

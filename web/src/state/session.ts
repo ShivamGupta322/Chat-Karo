@@ -12,3 +12,8 @@ export const useSessionStore = create<SessionStore>((set) => ({
     set({ connection });
   },
 }));
+
+/** The last bound full JID while connected or reconnecting, else null. */
+export function selectSessionJid(c: ConnectionState): string | null {
+  return c.status === 'connected' || c.status === 'reconnecting' ? c.jid : null;
+}

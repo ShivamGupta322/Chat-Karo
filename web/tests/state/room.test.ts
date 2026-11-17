@@ -142,3 +142,75 @@ describe('reduceRoom', () => {
     expect(s.timeline).toHaveLength(1);
   });
 });
+
+describe('reduceRoom: connection resilience', () => {
+  const joinedWithNotice = (): RoomState =>
+    run([
+      joining(A),
+      { type: 'room-joined', roomJid: A, nick: 'alice', created: false },
+      { type: 'occupant-joined', roomJid: A, nick: 'bob', isSelf: false },
+      msg('1'),
+    ]);
+
+  it('a terminal disconnect resets to the initial state, so a later join starts clean', () => {
+    const s1 = joinedWithNotice();
+    expect(s1.timeline.length).toBeGreaterThan(1);
+    const s2 = reduceRoom(s1, { type: 'connection', state: { status: 'disconnected' } });
+    expect(s2).toEqual(initialRoomState);
+    const s3 = reduceRoom(s2, joining(A));
+    expect(s3.timeline).toEqual([]);
+  });
+
+  it('a disconnect on an already-initial state returns the same reference', () => {
+    const s = { ...initialRoomState };
+    expect(reduceRoom(s, { type: 'connection', state: { status: 'disconnected' } })).toBe(s);
+  });
+
+  it('a nick-conflict retry keeps the timeline', () => {
+    const s1 = joinedWithNotice();
+    const s2 = reduceRoom(s1, joining(A, 'alice-2'));
+    expect(s2.timeline).toEqual(s1.timeline);
+  });
+
+  it('other connection statuses return the same reference', () => {
+    const s = joinedWithNotice();
+    const states = [
+      { status: 'connecting' },
+      { status: 'connected', jid: 'a@b/c' },
+      { status: 'reconnecting', jid: 'a@b/c', attempt: 1, nextAttemptAt: 5 },
+      { status: 'disconnecting' },
+    ] as const;
+    for (const state of states) {
+      expect(reduceRoom(s, { type: 'connection', state })).toBe(s);
+    }
+  });
+
+  it('room-suspended keeps the timeline, clears occupants and sets reconnecting', () => {
+    const s1 = joinedWithNotice();
+    const s2 = reduceRoom(s1, { type: 'room-suspended', roomJid: A });
+    expect(s2.status).toBe('reconnecting');
+    expect(s2.occupants).toEqual([]);
+    expect(s2.timeline).toEqual(s1.timeline);
+  });
+
+  it('room-suspended for another room returns the same reference', () => {
+    const s = joinedWithNotice();
+    expect(reduceRoom(s, { type: 'room-suspended', roomJid: B })).toBe(s);
+  });
+
+  it('suspended, rejoin and refilled occupants add no notices', () => {
+    const s1 = joinedWithNotice();
+    const s2 = run(
+      [
+        { type: 'room-suspended', roomJid: A },
+        joining(A),
+        { type: 'occupant-joined', roomJid: A, nick: 'bob', isSelf: false },
+        { type: 'occupant-joined', roomJid: A, nick: 'carol', isSelf: false },
+        { type: 'room-joined', roomJid: A, nick: 'alice', created: false },
+      ],
+      s1,
+    );
+    expect(s2.status).toBe('joined');
+    expect(s2.timeline).toEqual(s1.timeline);
+  });
+});

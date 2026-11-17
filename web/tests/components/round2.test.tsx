@@ -32,6 +32,7 @@ describe('ConnectionStatus', () => {
     [{ status: 'idle' }, 'Offline'],
     [{ status: 'connecting' }, 'Connecting…'],
     [{ status: 'disconnecting' }, 'Signing out…'],
+    [{ status: 'reconnecting', jid: 'a@b/c', attempt: 1, nextAttemptAt: null }, 'Reconnecting…'],
     [{ status: 'disconnected' }, 'Offline'],
   ] as const)('%j reads %s', (state, text) => {
     render(<ConnectionStatus state={state} />);

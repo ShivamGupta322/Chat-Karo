@@ -1,4 +1,5 @@
 import { createContext, useContext, useEffect, type ReactNode } from 'react';
+import { installLifecycleTriggers } from './lifecycle';
 import { installPageHideClose } from './pageHide';
 import type { XmppClient } from './types';
 
@@ -13,9 +14,11 @@ export function XmppProvider({
 }): React.JSX.Element {
   useEffect(() => {
     const removePageHide = installPageHideClose(client);
+    const removeLifecycle = installLifecycleTriggers(client);
     // No client.disconnect() here: StrictMode runs effects twice in dev and would kill the session.
     return () => {
       removePageHide();
+      removeLifecycle();
     };
   }, [client]);
   return <XmppContext.Provider value={client}>{children}</XmppContext.Provider>;

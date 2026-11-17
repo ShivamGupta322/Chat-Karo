@@ -1,3 +1,4 @@
+import { CONNECTION_TEXT } from '../ui/text';
 import type { ConnectionState } from '../xmpp';
 
 const VIEW = {
@@ -5,6 +6,7 @@ const VIEW = {
   disconnected: { text: 'Offline', dot: 'bg-ink-muted' },
   connecting: { text: 'Connecting…', dot: 'bg-warning' },
   connected: { text: 'Online', dot: 'bg-success' },
+  reconnecting: { text: CONNECTION_TEXT.statusReconnecting, dot: 'bg-warning' },
   disconnecting: { text: 'Signing out…', dot: 'bg-warning' },
 } satisfies Record<ConnectionState['status'], { text: string; dot: string }>;
 

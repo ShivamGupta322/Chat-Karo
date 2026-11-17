@@ -1,6 +1,6 @@
 import { act, render, screen, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
-import { beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { App } from '../../src/App';
 import { initialRoomState, useRoomStore } from '../../src/state/room';
 import { useSessionStore } from '../../src/state/session';
@@ -12,6 +12,10 @@ describe('chat flow', () => {
   beforeEach(() => {
     useSessionStore.setState({ connection: { status: 'idle' } });
     useRoomStore.setState({ ...initialRoomState });
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
   });
 
   it('logs in, joins a room, sees occupants and sends a message', async () => {
@@ -75,5 +79,94 @@ describe('chat flow', () => {
     ).toBeInTheDocument();
     expect(within(log).queryByText(/This room is locked/)).toBeNull();
     // Full UI flow; jsdom + userEvent can exceed the 5 s default on slower machines.
+  }, 20_000);
+
+  function mount(): ReturnType<typeof createFakeTransport> {
+    const t = createFakeTransport();
+    const client = createXmppClient(t, {
+      mucDomain: 'muc.chaterl.localhost',
+      random: () => 0.5,
+    });
+    render(
+      <XmppProvider client={client}>
+        <App xmppDomain="chaterl.localhost" mucDomain="muc.chaterl.localhost" />
+      </XmppProvider>,
+    );
+    return t;
+  }
+
+  async function signInAndJoin(
+    t: ReturnType<typeof createFakeTransport>,
+    user: ReturnType<typeof userEvent.setup>,
+  ): Promise<void> {
+    await user.type(screen.getByLabelText('Password'), 'pw');
+    await user.click(screen.getByRole('button', { name: 'Sign in' }));
+    act(() => {
+      t.pushStatus({ kind: 'connected', jid: 'alice@chaterl.localhost/r1' });
+    });
+    await user.click(await screen.findByRole('button', { name: 'Join' }));
+    act(() => {
+      t.pushStanza(presence('alice', ['110']));
+    });
+  }
+
+  it('survives a dropped connection: banner, disabled composer, then rejoin keeps the timeline', async () => {
+    const t = mount();
+    const user = userEvent.setup({ delay: null });
+    await signInAndJoin(t, user);
+    act(() => {
+      t.pushStanza(groupchat('bob', 'still here', '', 'm-keep'));
+    });
+    expect(within(screen.getByRole('log')).getByText('still here')).toBeInTheDocument();
+
+    vi.useFakeTimers();
+    act(() => {
+      t.pushStatus({ kind: 'disconnected' });
+    });
+    // Chat stays mounted (no bounce to the login form).
+    expect(screen.getByRole('button', { name: 'Sign out' })).toBeInTheDocument();
+    expect(screen.getByText('Connection lost.')).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Try now' })).toBeInTheDocument();
+    expect(screen.getByText('Reconnecting…')).toBeInTheDocument();
+    expect(screen.getByLabelText('Message')).toBeDisabled();
+    expect(within(screen.getByRole('log')).getByText('still here')).toBeInTheDocument();
+
+    act(() => {
+      vi.advanceTimersByTime(1000);
+    });
+    act(() => {
+      t.pushStatus({ kind: 'connecting' });
+      t.pushStatus({ kind: 'connected', jid: 'alice@chaterl.localhost/r2' });
+    });
+    act(() => {
+      t.pushStanza(presence('alice', ['110']));
+    });
+    expect(screen.queryByText('Connection lost.')).toBeNull();
+    expect(screen.getByLabelText('Message')).toBeEnabled();
+    expect(within(screen.getByRole('log')).getByText('still here')).toBeInTheDocument();
+  }, 20_000);
+
+  it('signing out while reconnecting shows the login form and the next session starts clean', async () => {
+    const t = mount();
+    const user = userEvent.setup({ delay: null });
+    await signInAndJoin(t, user);
+    act(() => {
+      t.pushStanza(presence('carol'));
+      t.pushStanza(groupchat('bob', 'old message', '', 'm-old'));
+    });
+    const log = screen.getByRole('log');
+    expect(within(log).getByText('carol joined')).toBeInTheDocument();
+
+    act(() => {
+      t.pushStatus({ kind: 'disconnected' });
+    });
+    expect(screen.getByText('Connection lost.')).toBeInTheDocument();
+    await user.click(screen.getByRole('button', { name: 'Sign out' }));
+    expect(screen.getByLabelText('Password')).toBeInTheDocument();
+    expect(t.connectCalls).toHaveLength(1);
+
+    await signInAndJoin(t, user);
+    expect(screen.queryByText('carol joined')).toBeNull();
+    expect(screen.queryByText('old message')).toBeNull();
   }, 20_000);
 });

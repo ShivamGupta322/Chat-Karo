@@ -7,6 +7,7 @@ export function bindXmppToStores(client: XmppClient): () => void {
   useSessionStore.getState().setConnection(client.getState());
   return client.subscribe((event) => {
     if (event.type === 'connection') useSessionStore.getState().setConnection(event.state);
-    else useRoomStore.getState().apply(event);
+    // The room store also sees connection events: a terminal disconnect clears its timeline.
+    useRoomStore.getState().apply(event);
   });
 }

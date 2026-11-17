@@ -31,3 +31,10 @@ export function normalizeNick(raw: string): string | null {
   if (/\p{Cc}/u.test(nick)) return null;
   return nick;
 }
+
+/** The domain part of a bare or full JID (empty when there is no @). */
+export function domainOf(jid: string): string {
+  const bare = bareJid(jid);
+  const i = bare.indexOf('@');
+  return i < 0 ? '' : bare.slice(i + 1);
+}

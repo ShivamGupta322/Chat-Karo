@@ -82,6 +82,13 @@
 
 [modules.mod_presence]
 
+# XEP-0199: answer client pings and reap dead/frozen sessions (frees MUC nicks). ADR-010.
+[modules.mod_ping]
+  send_pings = true
+  ping_interval = 60        # seconds of client inactivity before the server pings
+  timeout_action = "kill"
+  ping_req_timeout = 32     # seconds to wait for the pong
+
 [modules.mod_muc]
   host = "muc.@HOST@"
   access = "muc"

@@ -22,21 +22,29 @@ Learned in Phase 1 (carry into Phase 2):
 ## Phase 2 — Web client foundation
 - [x] Vite + React + TS + Tailwind scaffold, ESLint, Vitest (slice 2a)
 - [ ] `xmpp/` module: connect, reconnect with backoff, join/leave MUC, send/receive groupchat
-      (2a done: connect, join/leave, send/receive, nick-conflict retry, connection-lost; 2b: reconnect + MAM history)
+      (2a done: connect, join/leave, send/receive, nick-conflict retry, connection-lost; 2b-1 done: reconnect with
+      backoff, keepalive, liveness probe; 2b-2: MAM history)
 - [x] Chat page: MessageList, Composer, OccupantList (slice 2a)
 - [x] Branding & UI polish: product name "Nearby", design tokens, dark mode, chat bubbles, plain-language UI (slice 2a+, ADR-009)
 - [ ] `geo/useLocation` with permission/error states; dev-mode map location picker
 - **Demo:** client-side geohash → join room → chat (temporary, before geo_service)
 
 Carry-forward for the next slices (from the 2a/2a+ reviews):
-- **2b:** sessions drop while the tab is in the background ("Connection lost"). Every observed drop happened while the
+- **2b (RESOLVED in 2b-1, except the AC14 diagnosis pending a real background drop):** sessions drop while the tab is in the background ("Connection lost"). Every observed drop happened while the
   page was backgrounded or hidden, which points to the browser freezing it rather than a server idle timeout. First log
   the WebSocket close code and reason in `web/src/xmpp/`, then design keepalive and reconnect (XEP-0199 ping or
   `mod_websockets` `ping_rate`; possibly XEP-0198 resumption, which the server already enables). Check option names
   against the MongooseIM 6.2.1 docs.
-- **2b:** clear the room timeline on sign-out/disconnect, but keep it across nick-conflict retries (regression test
+- **2b (RESOLVED in 2b-1; Probe A: history copies on rejoin carry the same stanza-id, so `historyMaxStanzas` is kept):** clear the room timeline on sign-out/disconnect, but keep it across nick-conflict retries (regression test
   first). This fixes the stale "bob joined" notice after signing in again.
-- **2b:** MongooseIM adds `<stanza-id by=room>` to MUC messages, so de-duplicate MAM history against live messages by stanza-id.
+- **2b-2:** MongooseIM adds `<stanza-id by=room>` to MUC messages, so de-duplicate MAM history against live messages by stanza-id.
+- **2b-2 BLOCKER (Probe B, 2026-11-17):** the MongooseIM 6.2.1 room archive is broken in our setup.
+  - MUC MAM ids are tiny and counter-like (257, 513, … = microseconds 1, 2, … << 8), so result `<delay>` stamps read 1970-01-01.
+  - A `start` = now−24h filter returns `count 0`.
+  - After a restart, new messages collide with existing ids (`archive_muc_single_message_failed reason=duplicate_key`) and are silently dropped.
+  - The container clock is correct.
+  - Find and fix the root cause (MUC MAM id/timestamp generation, async writer) before any history UI.
+  - Also confirmed: `urn:xmpp:mam:2` is supported; `result@id` uses the live stanza-id format; a bogus `<after>` gives `item-not-found`.
 - **2c:** once the dev room form is gone, make the chat card fill the remaining height (`flex-1 min-h-0`), so the
   desktop page stops scrolling vertically.
 

@@ -112,3 +112,66 @@ browser styling. Nothing about branding had been decided before.
 - Disabled controls may fall below 4.5:1; WCAG 1.4.3 exempts inactive components.
 - The store binding moved from `xmpp/XmppProvider` to `state/useXmppStoreBinding` (called in `App`), so `xmpp/` no
   longer imports from `state/`.
+
+## ADR-010 — Web client resilience: reconnect and keepalive
+**Status:** Accepted (Phase 2, slice 2b-1, 2026-11-18)
+**Context:** Sessions dropped on network blips, server restarts and backgrounded tabs. The 2a client then sent users back
+to the login form, lost their room and left ghost occupants holding their nickname on the server.
+**Decision:**
+- **Backoff:** exponential, base 1 s, cap 30 s applied before ±20% jitter on every delay (24–36 s at the cap), reset after
+  60 s of stable connection.
+- **Wake triggers:**
+  - `wake('visible')` (tab became visible) while reconnecting fires the pending retry early, at most once per 5 s.
+  - An early attempt refunds its backoff step, so wakes never escalate the backoff.
+  - `wake('user')` ("Try now") and `wake('online')` skip both throttles (the 5 s retry throttle while reconnecting and
+    the 30 s probe throttle while connected). They still respect the in-flight guards (no fire while an attempt is in
+    flight, one probe at a time) and the refund.
+  - Live evidence:
+    - With the browser pane flapping visibility every ~6 s and MongooseIM down for 30 s, the countdown went
+      ~1, ~2–4, ~8, ~16 s and then held. Before the throttle and refund it reached 26 s after ~10 s.
+    - "Try now" clicked with 4 s left started an attempt at once. After it failed, the retry was rescheduled at the
+      same ~16 s step (17 s with jitter), not escalated.
+- **Liveness probe:** on online/visible/"Try now" while connected, a XEP-0199 ping to the domain with a 5 s timeout.
+  - `visible` probes are throttled to one per 30 s; the throttle resets on each connect; one probe in flight at a time.
+  - Any reply means alive; only a timeout counts as stale (→ reconnect).
+  - Live: pings at t=19 s and t=53 s over 75 s idle, versus every ~6 s before the throttle.
+- **Credentials:** the password is kept in an in-memory closure only, so drops can be retried. It is never persisted,
+  logged or emitted, and it is dropped on every terminal path. This supersedes ADR-008's "password not kept" bullet.
+- **Connection semantics:**
+  - A drop after a successful sign-in → `reconnecting`, with the Chat page kept and a banner.
+  - Terminal only for: auth failure, stream conflict (session replaced), user sign-out, pagehide (including during a
+    pending or in-flight retry).
+  - Failures of the initial sign-in are not retried.
+  - A transient auth failure during a full-stack restart is terminal; Strophe can't tell it from a revoked password.
+- **No client XEP-0198 (stream management):** Strophe 3.1.1 lacks it, SM is opt-in per stream, and MongooseIM resumption
+  doesn't survive a server restart (the main outage we handle). Reconnect + rejoin with history (and the MAM gap fill in
+  2b-2) is simpler. Revisit only if MAM catch-up proves insufficient.
+- **Server `mod_ping`:** `send_pings`, 60 s inactivity interval, `timeout_action = "kill"`, 32 s ping timeout. It reaps
+  dead or frozen sessions in ~92 s and frees their nicknames. The client answers XEP-0199 pings with `type='result'`.
+  - Live: a non-answering session was reaped in ~2 min, versus ghost occupants lasting 99 s+ (Probe A) and >241 s
+    without mod_ping.
+  - Caveat: the server's own ping to our app wasn't observable in testing, because client probes kept traffic inside
+    the 60 s window.
+- **Resources:** server-assigned resources are kept. A stable per-tab resource would turn a ghost session into a
+  terminal stream conflict, and the replaced session's MUC `unavailable` would be routed to the new session.
+- **`mod_websockets` `ping_rate`:** deferred to Phase 6 (reverse-proxy idle timeouts).
+- **Rooms during an outage:**
+  - Rooms become `suspended` (`room-suspended`; store status `reconnecting`).
+  - After reconnect they are rejoined with the base nick; the nick-conflict retry is unchanged.
+  - `historyMaxStanzas` (20) is kept on rejoin. Probe A showed history copies carry the same `stanza-id by=room`
+    (e.g. `1G1`) as the live copy, so the store de-dupes them.
+  - While reconnecting, the message list shows "Reconnecting… messages will appear here."
+- **Timeline:** cleared only on a terminal disconnect; kept across reconnects and nick-conflict retries.
+- **Close diagnostics:**
+  - `console.warn('xmpp socket closed', {code, reason≤123, wasClean, hidden, hiddenForMs, msSinceVisible})`.
+  - Logged only for connections that reached CONNECTED and that we didn't close ourselves. No JIDs, stanzas or
+    coordinates.
+  - Live: `{"code":1006,"reason":"","wasClean":false,"hidden":true,"hiddenForMs":4450,"msSinceVisible":5336}`, one
+    record per outage.
+  - The root cause of background-tab drops is still open until a real long-background drop is captured.
+**Consequences:**
+- Users ride out outages without re-entering credentials. The password lives in memory for the session.
+- The close listener reads Strophe's private `_proto.socket`, which ties it to the strophe.js 3.1.1 pin alongside the
+  ADR-008 shim. It is guarded, with a one-time warning if the field is missing. Re-check on any Strophe upgrade.
+- Under continuous visibility flapping the countdown keeps restarting, while real attempts happen at most every 5 s.
+  That's acceptable load, but the countdown can mislead.

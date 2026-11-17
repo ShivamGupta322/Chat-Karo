@@ -91,3 +91,14 @@ export function describeAddressError(
       return "That room isn't on this server.";
   }
 }
+
+export const CONNECTION_TEXT = {
+  statusReconnecting: 'Reconnecting…',
+  bannerLost: 'Connection lost.',
+  bannerAutoRetry: "We'll reconnect automatically.",
+  bannerRetryIn: (seconds: number): string => `Reconnecting in ${seconds}s…`,
+  bannerRetrying: 'Reconnecting…',
+  retryNow: 'Try now',
+  roomReconnecting: 'Reconnecting to the room…',
+  roomReconnectingEmpty: 'Reconnecting… messages will appear here.',
+} as const;

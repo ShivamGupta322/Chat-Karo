@@ -12,13 +12,18 @@ function fakeClient(state: ConnectionState): { client: XmppClient; disconnect: (
     leaveRoom: vi.fn(),
     sendGroupchat: (): SendResult => ({ ok: false, error: 'not-joined' }),
     subscribe: vi.fn(() => () => undefined),
+    wake: vi.fn(),
   };
   return { client, disconnect };
 }
 
 describe('installPageHideClose', () => {
-  it('disconnects when connected or connecting', () => {
-    const states: ConnectionState[] = [{ status: 'connected', jid: 'a@b/c' }, { status: 'connecting' }];
+  it('disconnects when connected, connecting or reconnecting', () => {
+    const states: ConnectionState[] = [
+      { status: 'connected', jid: 'a@b/c' },
+      { status: 'connecting' },
+      { status: 'reconnecting', jid: 'a@b/c', attempt: 1, nextAttemptAt: 5 },
+    ];
     for (const state of states) {
       const { client, disconnect } = fakeClient(state);
       const target = new EventTarget();

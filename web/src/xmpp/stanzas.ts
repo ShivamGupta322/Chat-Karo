@@ -130,3 +130,24 @@ export function parseGroupchat(el: Element): ParsedGroupchat | null {
 
   return { roomJid: bare, nick: resource, body, id: el.getAttribute('id'), stanzaId, delayedAt };
 }
+
+export const NS_PING = 'urn:xmpp:ping';
+
+export function buildPing(to: string, id: string): Element {
+  return xmlEl('iq', { type: 'get', to, id }, [xmlEl('ping', { xmlns: NS_PING })]);
+}
+
+export function isPingRequest(el: Element): boolean {
+  return (
+    el.localName === 'iq' &&
+    el.getAttribute('type') === 'get' &&
+    kids(el, 'ping', NS_PING).length > 0
+  );
+}
+
+export function buildIqResult(iq: Element): Element {
+  const attrs: Record<string, string> = { type: 'result', id: iq.getAttribute('id') ?? '' };
+  const from = iq.getAttribute('from');
+  if (from !== null) attrs.to = from;
+  return xmlEl('iq', attrs);
+}

@@ -1,3 +1,5 @@
+import type { BackoffPolicy } from './reconnect';
+
 export const MAX_MESSAGE_LENGTH = 2000;
 export const MAX_NICK_LENGTH = 32;
 
@@ -10,6 +12,8 @@ export type ConnectionState =
   | { status: 'idle' }
   | { status: 'connecting' }
   | { status: 'connected'; jid: string }
+  /** attempt: 1-based number of the next/in-flight retry. nextAttemptAt: epoch ms, null while an attempt is in flight. jid: last bound full JID. */
+  | { status: 'reconnecting'; jid: string; attempt: number; nextAttemptAt: number | null }
   | { status: 'disconnecting' }
   | { status: 'disconnected'; error?: ConnectionError };
 
@@ -50,6 +54,7 @@ export type XmppEvent =
   | { type: 'room-joined'; roomJid: string; nick: string; created: boolean }
   | { type: 'room-join-failed'; roomJid: string; reason: JoinFailure; condition?: string }
   | { type: 'room-left'; roomJid: string; reason: LeaveReason }
+  | { type: 'room-suspended'; roomJid: string }
   | { type: 'occupant-joined'; roomJid: string; nick: string; isSelf: boolean }
   | { type: 'occupant-left'; roomJid: string; nick: string }
   | { type: 'message'; message: ChatMessage }
@@ -67,7 +72,12 @@ export interface XmppClient {
   leaveRoom(roomJid: string): void;
   sendGroupchat(roomJid: string, body: string): SendResult;
   subscribe(listener: (e: XmppEvent) => void): () => void;
+  /** online / tab visible / "Try now": retry now if reconnecting, liveness-probe if connected, else no-op. */
+  wake(trigger: WakeTrigger): void;
 }
+
+/** What woke the client. Only 'visible' is throttled; 'online' and 'user' are deliberate. */
+export type WakeTrigger = 'visible' | 'online' | 'user';
 
 export interface XmppClientOptions {
   mucDomain: string;
@@ -77,4 +87,15 @@ export interface XmppClientOptions {
   historyMaxStanzas?: number;
   now?: () => number;
   newId?: () => string;
+  backoff?: Partial<BackoffPolicy>;
+  /** Staying connected this long (ms) resets the backoff. Default 60_000. */
+  stableAfterMs?: number;
+  /** Liveness ping timeout (ms). Default 5_000. */
+  probeTimeoutMs?: number;
+  /** Minimum gap (ms) between wake()-triggered reconnect attempts. Default 5_000. */
+  wakeMinIntervalMs?: number;
+  /** Minimum gap (ms) between liveness probes. Default 30_000. */
+  probeMinIntervalMs?: number;
+  /** [0,1) source for backoff jitter. Default Math.random. */
+  random?: () => number;
 }

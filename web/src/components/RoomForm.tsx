@@ -27,7 +27,7 @@ export function RoomForm({
   const [room, setRoom] = useState(defaultRoom);
   const [nick, setNick] = useState(defaultNick);
   const [error, setError] = useState<string | null>(null);
-  const active = status === 'joining' || status === 'joined';
+  const active = status === 'joining' || status === 'joined' || status === 'reconnecting';
 
   const handle = (e: FormEvent): void => {
     e.preventDefault();

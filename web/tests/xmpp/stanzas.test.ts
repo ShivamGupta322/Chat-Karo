@@ -1,6 +1,10 @@
 import { describe, expect, it } from 'vitest';
 import {
+  NS_PING,
   buildGroupchat,
+  buildIqResult,
+  buildPing,
+  isPingRequest,
   buildIqErrorReply,
   buildJoinPresence,
   buildLeavePresence,
@@ -171,5 +175,37 @@ describe('captured MongooseIM frames', () => {
 describe('parseErrorCondition', () => {
   it('defaults when <error> is missing', () => {
     expect(parseErrorCondition(parse('<message type="error"/>'))).toBe('undefined-condition');
+  });
+});
+
+describe('XEP-0199 ping stanzas', () => {
+  it('buildPing makes an iq get with a ping child in urn:xmpp:ping', () => {
+    const el = buildPing('chaterl.localhost', 'p1');
+    expect(el.localName).toBe('iq');
+    expect(el.getAttribute('type')).toBe('get');
+    expect(el.getAttribute('to')).toBe('chaterl.localhost');
+    expect(el.getAttribute('id')).toBe('p1');
+    const ping = el.children[0];
+    expect(ping?.localName).toBe('ping');
+    expect(ping?.namespaceURI).toBe(NS_PING);
+  });
+
+  it('isPingRequest accepts a ping get and rejects other iqs', () => {
+    expect(
+      isPingRequest(parse("<iq type='get' id='p1'><ping xmlns='urn:xmpp:ping'/></iq>")),
+    ).toBe(true);
+    expect(isPingRequest(parse("<iq type='get' id='p1'><ping xmlns='urn:other'/></iq>"))).toBe(false);
+    expect(
+      isPingRequest(parse("<iq type='result' id='p1'><ping xmlns='urn:xmpp:ping'/></iq>")),
+    ).toBe(false);
+    expect(isPingRequest(parse("<iq type='get' id='p1'><query xmlns='x:y'/></iq>"))).toBe(false);
+  });
+
+  it('buildIqResult copies the id and addresses the sender', () => {
+    const el = buildIqResult(parse("<iq type='get' id='p1' from='chaterl.localhost'/>"));
+    expect(el.getAttribute('type')).toBe('result');
+    expect(el.getAttribute('id')).toBe('p1');
+    expect(el.getAttribute('to')).toBe('chaterl.localhost');
+    expect(el.children).toHaveLength(0);
   });
 });

@@ -11,7 +11,7 @@ export type TimelineItem =
 export interface RoomState {
   roomJid: string | null;
   nick: string | null;
-  status: 'none' | 'joining' | 'joined' | 'failed' | 'left';
+  status: 'none' | 'joining' | 'joined' | 'failed' | 'left' | 'reconnecting';
   failure: { reason: JoinFailure; condition?: string } | null;
   leftReason: LeaveReason | null;
   occupants: string[];
@@ -44,10 +44,24 @@ function addOccupant(list: string[], nick: string): string[] {
   return [...list, nick].sort((a, b) => a.localeCompare(b));
 }
 
+function isInitial(s: RoomState): boolean {
+  return (
+    s.roomJid === null &&
+    s.nick === null &&
+    s.status === 'none' &&
+    s.failure === null &&
+    s.leftReason === null &&
+    s.occupants.length === 0 &&
+    s.timeline.length === 0
+  );
+}
+
 export function reduceRoom(state: RoomState, event: XmppEvent): RoomState {
   switch (event.type) {
     case 'connection':
-      return state;
+      // Only a terminal disconnect clears the timeline; drops arrive as 'reconnecting' and keep it.
+      if (event.state.status !== 'disconnected') return state;
+      return isInitial(state) ? state : { ...initialRoomState };
     case 'message-error':
       if (event.roomJid !== state.roomJid) return state;
       return {
@@ -109,6 +123,8 @@ export function reduceRoom(state: RoomState, event: XmppEvent): RoomState {
             : { reason: event.reason },
         occupants: [],
       };
+    case 'room-suspended':
+      return { ...state, status: 'reconnecting', occupants: [] };
     case 'room-left':
       return { ...state, status: 'left', leftReason: event.reason, occupants: [] };
     case 'occupant-joined': {

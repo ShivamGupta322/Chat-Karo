@@ -1,3 +1,4 @@
+import { selectSessionJid } from '../state/session';
 import { localpartOf, type ConnectionState } from '../xmpp';
 import { ConnectionStatus } from './ConnectionStatus';
 import { Wordmark } from './Logo';
@@ -8,7 +9,8 @@ export interface AppHeaderProps {
 }
 
 export function AppHeader({ connection, onSignOut }: AppHeaderProps): React.JSX.Element {
-  const name = connection.status === 'connected' ? localpartOf(connection.jid) : '';
+  const sessionJid = selectSessionJid(connection);
+  const name = sessionJid === null ? '' : localpartOf(sessionJid);
   return (
     <header className="sticky top-0 z-10 border-b border-line bg-surface">
       <div className="mx-auto flex w-full max-w-5xl flex-wrap items-center justify-between gap-x-3 gap-y-2 px-3 py-2 sm:px-4">
