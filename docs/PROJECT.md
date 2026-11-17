@@ -6,6 +6,9 @@ You open the app and see a live chat for the area around you. Nobody needs a fri
 Walk into a college campus, a café or a conference and you're in that area's conversation. Walk out and
 you leave it.
 
+**Naming:** the product is called **Nearby**; **chatErl** is the codebase name (repo, package, Erlang
+apps, XMPP domain and env vars keep it).
+
 **Goal:** a polished, deployable portfolio/resume project showing real backend skills — Erlang/OTP
 process design, XMPP, geospatial queries and privacy-conscious system design — built solo with
 Claude Code.

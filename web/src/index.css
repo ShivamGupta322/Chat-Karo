@@ -1,1 +1,74 @@
 @import "tailwindcss";
+
+@theme {
+  --font-sans: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue",
+    Arial, "Noto Sans", sans-serif, "Apple Color Emoji", "Segoe UI Emoji";
+
+  --color-canvas: #f8fafc; /* page background */
+  --color-surface: #ffffff; /* cards, inputs */
+  --color-surface-sunken: #f1f5f9; /* others' bubbles, avatars, chips */
+  --color-line: #e2e8f0; /* decorative borders/dividers only */
+  --color-field: #64748b; /* input borders (non-text 3:1) */
+  --color-ink: #0f172a; /* body text */
+  --color-ink-muted: #475569; /* secondary text, meta, placeholders */
+  --color-bubble-meta: #475569; /* meta text on surface-sunken */
+  --color-accent: #0f766e; /* the ONE accent: own bubbles, primary buttons */
+  --color-accent-strong: #115e59; /* hover/active on accent */
+  --color-on-accent: #ffffff; /* text on accent */
+  --color-on-accent-muted: #ccfbf1; /* time/meta inside own bubble */
+  --color-accent-ink: #0f766e; /* accent-coloured text, links, focus ring */
+  --color-danger: #b91c1c;
+  --color-success: #15803d;
+  --color-warning: #b45309;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --color-canvas: #0f172a;
+    --color-surface: #1e293b;
+    --color-surface-sunken: #334155;
+    --color-line: #334155;
+    --color-field: #64748b;
+    --color-ink: #f1f5f9;
+    --color-ink-muted: #94a3b8;
+    --color-bubble-meta: #cbd5e1;
+    --color-accent: #0f766e;
+    --color-accent-strong: #115e59;
+    --color-on-accent: #ffffff;
+    --color-on-accent-muted: #ccfbf1;
+    --color-accent-ink: #5eead4;
+    --color-danger: #fca5a5;
+    --color-success: #86efac;
+    --color-warning: #fcd34d;
+  }
+}
+
+:root {
+  color-scheme: light dark;
+}
+
+@layer base {
+  html,
+  body {
+    @apply bg-canvas text-ink font-sans antialiased;
+  }
+
+  :focus-visible {
+    outline: 2px solid var(--color-accent-ink);
+    outline-offset: 2px;
+  }
+
+  ::placeholder {
+    color: var(--color-ink-muted);
+    opacity: 1;
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    *,
+    *::before,
+    *::after {
+      transition-duration: 0.01ms !important;
+      animation-duration: 0.01ms !important;
+    }
+  }
+}

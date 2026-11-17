@@ -1,11 +1,12 @@
+import { AppHeader } from '../components/AppHeader';
 import { Composer } from '../components/Composer';
-import { ConnectionStatus } from '../components/ConnectionStatus';
 import { MessageList } from '../components/MessageList';
 import { OccupantList } from '../components/OccupantList';
 import { RoomForm } from '../components/RoomForm';
-import { describeJoinFailure } from '../components/describe';
 import { useRoomStore } from '../state/room';
 import { useSessionStore } from '../state/session';
+import { roomLabel } from '../ui/addresses';
+import { describeJoinFailure } from '../ui/text';
 import { localpartOf, useXmppClient } from '../xmpp';
 
 export function Chat({ mucDomain }: { mucDomain: string }): React.JSX.Element {
@@ -14,59 +15,71 @@ export function Chat({ mucDomain }: { mucDomain: string }): React.JSX.Element {
   const room = useRoomStore();
   const jid = connection.status === 'connected' ? connection.jid : '';
   const joined = room.status === 'joined' && room.roomJid !== null;
+  const label = room.roomJid === null ? '' : roomLabel(room.roomJid);
 
   return (
-    <main className="mx-auto grid max-w-3xl gap-3 p-4">
-      <header className="flex flex-wrap items-center justify-between gap-2">
-        <h1 className="text-xl font-semibold">chatErl</h1>
-        <ConnectionStatus state={connection} />
-        <button
-          type="button"
-          onClick={() => {
-            client.disconnect();
-          }}
-          className="rounded border border-slate-400 px-3 py-1.5 text-sm"
-        >
-          Disconnect
-        </button>
-      </header>
-
-      <RoomForm
-        defaultRoomJid={`lobby@${mucDomain}`}
-        defaultNick={localpartOf(jid)}
-        mucDomain={mucDomain}
-        status={room.status}
-        onJoin={(roomJid, nick) => {
-          client.joinRoom(roomJid, nick);
-        }}
-        onLeave={() => {
-          if (room.roomJid !== null) client.leaveRoom(room.roomJid);
+    <div className="flex min-h-dvh flex-col">
+      <AppHeader
+        connection={connection}
+        onSignOut={() => {
+          client.disconnect();
         }}
       />
-
-      <p role="status" className="text-sm text-slate-600">
-        {room.status === 'joining' && `Joining ${room.roomJid ?? ''}...`}
-        {room.status === 'joined' && `In ${room.roomJid ?? ''} as ${room.nick ?? ''}`}
-        {room.status === 'failed' && room.failure && describeJoinFailure(room.failure.reason)}
-        {room.status === 'left' && 'You left the room'}
-      </p>
-
-      <div className="grid gap-3 md:grid-cols-[1fr_12rem]">
-        <div className="grid min-w-0 gap-2">
-          <MessageList items={room.timeline} selfNick={room.nick} />
-          <Composer
-            disabled={!joined}
-            onSend={(body) =>
-              room.roomJid === null
-                ? { ok: false, error: 'not-joined' }
-                : client.sendGroupchat(room.roomJid, body)
-            }
+      <main className="mx-auto grid w-full max-w-5xl gap-3 p-3 sm:p-4 md:grid-cols-[1fr_16rem] md:items-start">
+        <div className="grid min-w-0 gap-3">
+          <RoomForm
+            defaultRoom="lobby"
+            defaultNick={localpartOf(jid)}
+            mucDomain={mucDomain}
+            status={room.status}
+            onJoin={(roomJid, nick) => {
+              client.joinRoom(roomJid, nick);
+            }}
+            onLeave={() => {
+              if (room.roomJid !== null) client.leaveRoom(room.roomJid);
+            }}
           />
+
+          <p role="status" className="m-0 text-sm text-ink-muted">
+            {room.status === 'joining' && (
+              <>
+                Joining <strong className="font-semibold text-ink">{label}</strong>…
+              </>
+            )}
+            {room.status === 'joined' && (
+              <>
+                You're in <strong className="font-semibold text-ink">{label}</strong> as{' '}
+                {room.nick ?? ''}
+              </>
+            )}
+            {room.status === 'failed' && room.failure && describeJoinFailure(room.failure.reason)}
+            {room.status === 'left' && 'You left the room'}
+          </p>
+
+          <section
+            aria-label="Chat"
+            className="min-w-0 rounded-2xl border border-line bg-surface shadow-sm"
+          >
+            <MessageList
+              items={room.timeline}
+              emptyText={joined ? 'No messages yet. Say hello!' : 'Join a room to start chatting.'}
+            />
+            <div className="border-t border-line p-3 sm:p-4">
+              <Composer
+                disabled={!joined}
+                onSend={(body) =>
+                  room.roomJid === null
+                    ? { ok: false, error: 'not-joined' }
+                    : client.sendGroupchat(room.roomJid, body)
+                }
+              />
+            </div>
+          </section>
         </div>
         <div className="min-w-0">
           <OccupantList occupants={room.occupants} selfNick={room.nick} />
         </div>
-      </div>
-    </main>
+      </main>
+    </div>
   );
 }

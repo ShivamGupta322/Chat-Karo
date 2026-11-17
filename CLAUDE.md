@@ -4,7 +4,7 @@ Guidance for Claude Code working in this repository. Read this first, every sess
 
 ## Project in one line
 
-**chatErl** — a location-based real-time chat: users are automatically placed into chat rooms for
+**chatErl** (product name: **Nearby**) — a location-based real-time chat: users are automatically placed into chat rooms for
 the geohash cell they are standing in ("chat with people within ~500 m"). Solo portfolio project.
 
 Full context: [docs/PROJECT.md](docs/PROJECT.md) · Architecture: [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) ·

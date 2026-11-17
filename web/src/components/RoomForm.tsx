@@ -1,9 +1,11 @@
 import { useState, type FormEvent } from 'react';
-import { isValidRoomJid, normalizeNick } from '../xmpp';
 import type { RoomState } from '../state/room';
+import { toRoomJid } from '../ui/addresses';
+import { describeAddressError, describeJoinFailure } from '../ui/text';
+import { normalizeNick } from '../xmpp';
 
 export interface RoomFormProps {
-  defaultRoomJid: string;
+  defaultRoom: string;
   defaultNick: string;
   mucDomain: string;
   status: RoomState['status'];
@@ -11,78 +13,112 @@ export interface RoomFormProps {
   onLeave: () => void;
 }
 
+const INPUT =
+  'w-full min-w-0 rounded-lg border border-field bg-surface px-3 py-2 text-ink disabled:bg-surface-sunken';
+
 export function RoomForm({
-  defaultRoomJid,
+  defaultRoom,
   defaultNick,
   mucDomain,
   status,
   onJoin,
   onLeave,
 }: RoomFormProps): React.JSX.Element {
-  const [roomJid, setRoomJid] = useState(defaultRoomJid);
+  const [room, setRoom] = useState(defaultRoom);
   const [nick, setNick] = useState(defaultNick);
   const [error, setError] = useState<string | null>(null);
   const active = status === 'joining' || status === 'joined';
 
   const handle = (e: FormEvent): void => {
     e.preventDefault();
-    const room = roomJid.trim();
-    const n = normalizeNick(nick);
-    if (!isValidRoomJid(room, mucDomain)) {
-      setError(`Room must look like name@${mucDomain} (lowercase)`);
+    const res = toRoomJid(room, mucDomain);
+    if (!res.ok) {
+      setError(describeAddressError('room', res.error, mucDomain));
       return;
     }
+    const n = normalizeNick(nick);
     if (n === null) {
-      setError('Nickname must be 1-32 characters with no control characters');
+      setError(describeJoinFailure('invalid-nick'));
       return;
     }
     setError(null);
-    onJoin(room, n);
+    onJoin(res.jid, n);
   };
 
   return (
-    <form onSubmit={handle} className="flex flex-wrap items-end gap-2" aria-label="Room">
-      <label className="grid min-w-40 flex-1 gap-1 text-sm">
-        Room JID
-        <input
-          className="rounded border border-slate-300 px-2 py-1.5"
-          value={roomJid}
-          disabled={active}
-          onChange={(e) => {
-            setRoomJid(e.target.value);
-          }}
-        />
-      </label>
-      <label className="grid min-w-32 gap-1 text-sm">
-        Nickname
-        <input
-          className="rounded border border-slate-300 px-2 py-1.5"
-          value={nick}
-          disabled={active}
-          onChange={(e) => {
-            setNick(e.target.value);
-          }}
-        />
-      </label>
-      {active ? (
-        <button
-          key="leave"
-          type="button"
-          onClick={(e) => {
-            e.preventDefault();
-            onLeave();
-          }}
-          className="rounded border border-slate-400 px-3 py-1.5"
-        >
-          Leave
-        </button>
-      ) : (
-        <button key="join" type="submit" className="rounded bg-blue-600 px-3 py-1.5 text-white">
-          Join
-        </button>
-      )}
+    <form
+      onSubmit={handle}
+      className="grid gap-3 rounded-2xl border border-line bg-surface p-3 shadow-sm sm:p-4"
+      aria-labelledby="room-form-h"
+    >
+      <h2 id="room-form-h" className="m-0 text-sm font-semibold">
+        Room (dev)
+      </h2>
+      <div className="grid gap-3 sm:flex sm:flex-wrap sm:items-start">
+        <div className="grid min-w-0 gap-1 text-sm sm:min-w-32 sm:flex-1">
+          <label htmlFor="room-name" className="font-medium">
+            Room
+          </label>
+          <input
+            id="room-name"
+            className={INPUT}
+            value={room}
+            disabled={active}
+            aria-describedby="room-hint"
+            autoCapitalize="none"
+            spellCheck={false}
+            onChange={(e) => {
+              setRoom(e.target.value);
+            }}
+          />
+          <span id="room-hint" className="text-xs text-ink-muted">
+            Room name, e.g. lobby
+          </span>
+        </div>
+        <div className="grid min-w-0 gap-1 text-sm sm:min-w-32 sm:flex-1">
+          <label htmlFor="room-nick" className="font-medium">
+            Your name
+          </label>
+          <input
+            id="room-nick"
+            className={INPUT}
+            value={nick}
+            disabled={active}
+            aria-describedby="nick-hint"
+            onChange={(e) => {
+              setNick(e.target.value);
+            }}
+          />
+          <span id="nick-hint" className="text-xs text-ink-muted">
+            Shown to others in the room
+          </span>
+        </div>
+        <div className="sm:pt-6">
+          {active ? (
+            <button
+              key="leave"
+              type="button"
+              onClick={(e) => {
+                e.preventDefault();
+                onLeave();
+              }}
+              className="rounded-lg border border-field bg-surface px-4 py-2 text-sm font-medium hover:bg-surface-sunken"
+            >
+              Leave
+            </button>
+          ) : (
+            <button
+              key="join"
+              type="submit"
+              className="rounded-lg bg-accent px-4 py-2 text-sm font-medium text-on-accent hover:bg-accent-strong"
+            >
+              Join
+            </button>
+          )}
+        </div>
+      </div>
       {error !== null && (
-        <p role="alert" className="w-full text-sm text-red-700">
+        <p role="alert" className="m-0 text-sm text-danger">
           {error}
         </p>
       )}

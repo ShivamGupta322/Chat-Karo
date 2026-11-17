@@ -1,4 +1,6 @@
-# chatErl
+# Nearby
+
+_Location-based chat (codebase: chatErl)_
 
 **Chat with the people around you.** Open the app and you're in a live chat for the area you're standing
 in — a campus, a café, a conference hall. No friend list, no invites. Walk away and you leave the room.
@@ -61,9 +63,9 @@ npm ci
 npm run dev      # http://localhost:5173
 ```
 
-Log in as `alice@chaterl.localhost` with `DEV_USER_PASSWORD` from your own `.env`, then join the default
-room `lobby@muc.chaterl.localhost`. Open a private window as `bob` to chat between two users. Slice 2a
-has no reconnect, history or geolocation yet; the room JID is entered by hand.
+Sign in with the username `alice` and `DEV_USER_PASSWORD` from your own `.env`, then join the default
+room `lobby`. Open a private window as `bob` to chat between two users. The client has no reconnect,
+history or geolocation yet; the room name is entered by hand (dev only).
 
 ## Project docs
 

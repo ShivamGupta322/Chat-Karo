@@ -1,6 +1,7 @@
 import React from 'react';
 import { createRoot } from 'react-dom/client';
 import { App } from './App';
+import { ConfigError } from './components/ConfigError';
 import { parseConfig } from './config';
 import './index.css';
 import { createXmppClient, XmppProvider } from './xmpp';
@@ -13,17 +14,7 @@ const root = createRoot(container);
 const result = parseConfig(import.meta.env);
 
 if (!result.ok) {
-  root.render(
-    <main className="mx-auto max-w-lg p-4">
-      <h1 className="mb-2 text-xl font-semibold">Configuration error</h1>
-      <p className="mb-2 text-sm">Fix these settings in the repo-root .env and restart:</p>
-      <ul className="list-disc pl-5 text-sm text-red-700">
-        {result.errors.map((e) => (
-          <li key={e}>{e}</li>
-        ))}
-      </ul>
-    </main>,
-  );
+  root.render(<ConfigError errors={result.errors} />);
 } else {
   const { config } = result;
   // One client at module level (outside React) so StrictMode cannot create two.

@@ -1,25 +1,22 @@
-import { bareJid, type ConnectionState } from '../xmpp';
-import { describeConnectionError } from './describe';
+import type { ConnectionState } from '../xmpp';
 
-function label(state: ConnectionState): string {
-  switch (state.status) {
-    case 'idle':
-      return 'Not connected';
-    case 'connecting':
-      return 'Connecting...';
-    case 'connected':
-      return `Connected as ${bareJid(state.jid)}`;
-    case 'disconnecting':
-      return 'Disconnecting...';
-    case 'disconnected':
-      return state.error ? describeConnectionError(state.error) : 'Disconnected';
-  }
-}
+const VIEW = {
+  idle: { text: 'Offline', dot: 'bg-ink-muted' },
+  disconnected: { text: 'Offline', dot: 'bg-ink-muted' },
+  connecting: { text: 'Connecting…', dot: 'bg-warning' },
+  connected: { text: 'Online', dot: 'bg-success' },
+  disconnecting: { text: 'Signing out…', dot: 'bg-warning' },
+} satisfies Record<ConnectionState['status'], { text: string; dot: string }>;
 
 export function ConnectionStatus({ state }: { state: ConnectionState }): React.JSX.Element {
+  const view = VIEW[state.status];
   return (
-    <p role="status" className="min-w-0 truncate text-sm text-slate-600">
-      {label(state)}
+    <p
+      role="status"
+      className="m-0 inline-flex items-center gap-1.5 rounded-full bg-surface-sunken px-2.5 py-1 text-xs font-medium text-ink"
+    >
+      <span aria-hidden="true" className={`size-2 rounded-full ${view.dot}`} />
+      {view.text}
     </p>
   );
 }

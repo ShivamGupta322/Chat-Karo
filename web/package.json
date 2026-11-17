@@ -2,6 +2,7 @@
   "name": "chaterl-web",
   "private": true,
   "version": "0.0.0",
+  "description": "Nearby — web client (chatErl codebase)",
   "type": "module",
   "scripts": {
     "dev": "vite",

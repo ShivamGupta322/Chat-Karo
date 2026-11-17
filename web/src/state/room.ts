@@ -1,5 +1,5 @@
 import { create } from 'zustand';
-import { describeMessageError } from '../components/describe';
+import { describeMessageError } from '../ui/text';
 import type { ChatMessage, JoinFailure, LeaveReason, XmppEvent } from '../xmpp/types';
 
 export const MAX_TIMELINE = 500;

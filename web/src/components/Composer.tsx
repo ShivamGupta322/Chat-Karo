@@ -1,17 +1,11 @@
 import { useState, type FormEvent } from 'react';
+import { describeSendError } from '../ui/text';
 import { MAX_MESSAGE_LENGTH, type SendResult } from '../xmpp';
 
 export interface ComposerProps {
   disabled: boolean;
   onSend: (body: string) => SendResult;
 }
-
-const ERRORS = {
-  empty: 'Type a message first',
-  'too-long': `Message is too long (max ${MAX_MESSAGE_LENGTH} characters)`,
-  'not-connected': 'You are not connected',
-  'not-joined': 'Join a room first',
-} as const;
 
 export function Composer({ disabled, onSend }: ComposerProps): React.JSX.Element {
   const [text, setText] = useState('');
@@ -26,38 +20,51 @@ export function Composer({ disabled, onSend }: ComposerProps): React.JSX.Element
       setText('');
       setError(null);
     } else {
-      setError(ERRORS[res.error]);
+      setError(describeSendError(res.error));
     }
   };
 
   return (
     <form onSubmit={handle} className="grid gap-1" aria-label="Send a message">
-      <div className="flex gap-2">
-        <label className="grid flex-1 gap-1 text-sm">
+      <div className="flex items-center gap-2">
+        <label htmlFor="composer-input" className="sr-only">
           Message
-          <input
-            className="rounded border border-slate-300 px-2 py-1.5 disabled:bg-slate-100"
-            value={text}
-            disabled={disabled}
-            autoComplete="off"
-            onChange={(e) => {
-              setText(e.target.value);
-            }}
-          />
         </label>
+        <input
+          id="composer-input"
+          className="min-w-0 flex-1 rounded-full border border-field bg-surface px-4 py-2 text-ink disabled:bg-surface-sunken"
+          placeholder="Message the room…"
+          value={text}
+          disabled={disabled}
+          autoComplete="off"
+          onChange={(e) => {
+            setText(e.target.value);
+          }}
+        />
         <button
           type="submit"
           disabled={disabled}
-          className="self-end rounded bg-blue-600 px-3 py-1.5 text-white disabled:opacity-50"
+          className="inline-flex shrink-0 items-center gap-2 rounded-full bg-accent px-4 py-2 font-medium text-on-accent hover:bg-accent-strong disabled:opacity-50"
         >
-          Send
+          <svg
+            viewBox="0 0 24 24"
+            className="size-4"
+            fill="none"
+            stroke="currentColor"
+            strokeWidth="2"
+            strokeLinecap="round"
+            strokeLinejoin="round"
+            aria-hidden="true"
+          >
+            <path d="M22 2 11 13" />
+            <path d="M22 2 15 22l-4-9-9-4 20-7z" />
+          </svg>
+          <span className="sr-only sm:not-sr-only">Send</span>
         </button>
       </div>
-      {remaining < 200 && (
-        <p className="text-xs text-slate-500">{remaining} characters left</p>
-      )}
+      {remaining < 200 && <p className="m-0 text-xs text-ink-muted">{remaining} characters left</p>}
       {error !== null && (
-        <p role="alert" className="text-sm text-red-700">
+        <p role="alert" className="m-0 text-sm text-danger">
           {error}
         </p>
       )}

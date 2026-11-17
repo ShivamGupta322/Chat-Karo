@@ -89,3 +89,26 @@ names, never config lines. Upgrading MongooseIM means re-diffing the template ag
   so `envPrefix` must never be changed and `loadEnv(…, '')` must never be used.
 **Consequences:** The XMPP logic is fully unit-testable (138 tests in 2a). Upgrading Strophe means re-checking
 the shim warning and the status mapping in the adapter.
+
+## ADR-009 — Product name "Nearby" and UI design tokens
+**Status:** Accepted (Phase 2, slice 2a+, 2026-11-17)
+**Context:** The UI needed a user-facing identity. The 2a screens used XMPP jargon ("JID", "Room JID") and default
+browser styling. Nothing about branding had been decided before.
+**Decision:**
+- The product is called **Nearby** in every user-facing surface (UI, page title, README headline). **chatErl** stays the
+  codebase name (repo, `web/package.json` name, Erlang apps, XMPP domain, env vars).
+- Visual direction is "clean & calm": one teal accent (`#0f766e`), slate neutrals, automatic dark mode via
+  `prefers-color-scheme` (no manual toggle).
+- Colours exist only as semantic Tailwind v4 `@theme` tokens in `web/src/index.css`; raw palette classes are banned. Every
+  token pair is documented at ≥ 4.5:1 (text) / ≥ 3:1 (UI boundaries) in both modes. Meta text on `surface-sunken`
+  uses its own `bubble-meta` token, because `ink-muted` on that background is only 4.04:1 in dark mode.
+- System font stack (no web fonts, which also keeps visitors' IPs away from third parties) and inline SVG for the logo and icons.
+- User-facing text lives in `web/src/ui/text.ts` with no protocol jargon. The dev UI takes a username
+  (`alice` → `alice@<domain>`) and a room name (`lobby` → `lobby@<muc domain>`) via `web/src/ui/addresses.ts`. Full
+  addresses are never shown to users.
+**Consequences:**
+- A new colour means a new token plus a contrast check.
+- The codename/product-name mismatch is deliberate and documented.
+- Disabled controls may fall below 4.5:1; WCAG 1.4.3 exempts inactive components.
+- The store binding moved from `xmpp/XmppProvider` to `state/useXmppStoreBinding` (called in `App`), so `xmpp/` no
+  longer imports from `state/`.

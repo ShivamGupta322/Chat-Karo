@@ -24,8 +24,21 @@ Learned in Phase 1 (carry into Phase 2):
 - [ ] `xmpp/` module: connect, reconnect with backoff, join/leave MUC, send/receive groupchat
       (2a done: connect, join/leave, send/receive, nick-conflict retry, connection-lost; 2b: reconnect + MAM history)
 - [x] Chat page: MessageList, Composer, OccupantList (slice 2a)
+- [x] Branding & UI polish: product name "Nearby", design tokens, dark mode, chat bubbles, plain-language UI (slice 2a+, ADR-009)
 - [ ] `geo/useLocation` with permission/error states; dev-mode map location picker
 - **Demo:** client-side geohash → join room → chat (temporary, before geo_service)
+
+Carry-forward for the next slices (from the 2a/2a+ reviews):
+- **2b:** sessions drop while the tab is in the background ("Connection lost"). Every observed drop happened while the
+  page was backgrounded or hidden, which points to the browser freezing it rather than a server idle timeout. First log
+  the WebSocket close code and reason in `web/src/xmpp/`, then design keepalive and reconnect (XEP-0199 ping or
+  `mod_websockets` `ping_rate`; possibly XEP-0198 resumption, which the server already enables). Check option names
+  against the MongooseIM 6.2.1 docs.
+- **2b:** clear the room timeline on sign-out/disconnect, but keep it across nick-conflict retries (regression test
+  first). This fixes the stale "bob joined" notice after signing in again.
+- **2b:** MongooseIM adds `<stanza-id by=room>` to MUC messages, so de-duplicate MAM history against live messages by stanza-id.
+- **2c:** once the dev room form is gone, make the chat card fill the remaining height (`flex-1 min-h-0`), so the
+  desktop page stops scrolling vertically.
 
 ## Phase 3 — geo_service
 - [ ] rebar3 app, supervision tree, sys.config, Dockerfile

@@ -26,12 +26,12 @@ describe('chat flow', () => {
 
     // 1. log in
     await user.type(screen.getByLabelText('Password'), 'pw');
-    await user.click(screen.getByRole('button', { name: 'Log in' }));
+    await user.click(screen.getByRole('button', { name: 'Sign in' }));
     expect(t.connectCalls[0]?.jid).toBe('alice@chaterl.localhost');
     act(() => {
       t.pushStatus({ kind: 'connected', jid: 'alice@chaterl.localhost/r1' });
     });
-    expect(await screen.findByRole('button', { name: 'Disconnect' })).toBeInTheDocument();
+    expect(await screen.findByRole('button', { name: 'Sign out' })).toBeInTheDocument();
 
     // 2. join
     await user.click(screen.getByRole('button', { name: 'Join' }));
@@ -41,13 +41,13 @@ describe('chat flow', () => {
       t.pushStanza(presence('bob'));
       t.pushStanza(presence('alice', ['110']));
     });
-    const occupants = await screen.findByRole('heading', { name: /Occupants/ });
-    expect(occupants).toHaveTextContent('Occupants (2)');
+    const occupants = await screen.findByRole('heading', { name: /People here/ });
+    expect(occupants).toHaveTextContent(/People here.*2/);
     const section = occupants.closest('section');
     expect(section).not.toBeNull();
     if (section) {
       expect(within(section).getByText('bob')).toBeInTheDocument();
-      expect(within(section).getByText('(you)')).toBeInTheDocument();
+      expect(within(section).getByText('(you)', { exact: false })).toBeInTheDocument();
     }
 
     // 3. send and see the echo
