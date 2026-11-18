@@ -102,3 +102,11 @@ export const CONNECTION_TEXT = {
   roomReconnecting: 'Reconnecting to the room…',
   roomReconnectingEmpty: 'Reconnecting… messages will appear here.',
 } as const;
+
+export const HISTORY_TEXT = {
+  loading: 'Loading recent messages…',
+  emptyLoading: 'Loading recent messages…',
+  failed: "Couldn't load recent messages.",
+  retry: 'Try again',
+  gapTruncated: "Some messages from while you were away couldn't be loaded.",
+} as const;

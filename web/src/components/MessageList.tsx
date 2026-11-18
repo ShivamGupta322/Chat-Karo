@@ -5,6 +5,8 @@ import { toTimelineRows, type TimelineRow } from './timelineRows';
 export interface MessageListProps {
   items: TimelineItem[];
   emptyText: string;
+  /** True while history is loading; exposed to assistive tech as aria-busy. */
+  busy?: boolean;
 }
 
 const NEAR_BOTTOM_PX = 80;
@@ -55,7 +57,7 @@ function MessageRow({
   );
 }
 
-export function MessageList({ items, emptyText }: MessageListProps): React.JSX.Element {
+export function MessageList({ items, emptyText, busy }: MessageListProps): React.JSX.Element {
   const ref = useRef<HTMLOListElement>(null);
   const stick = useRef(true);
   const rows = toTimelineRows(items);
@@ -83,6 +85,7 @@ export function MessageList({ items, emptyText }: MessageListProps): React.JSX.E
       role="log"
       aria-live="polite"
       aria-label="Messages"
+      aria-busy={busy ? 'true' : undefined}
       className="m-0 grid h-[55dvh] list-none content-start gap-0.5 overflow-y-auto p-3 sm:p-4 md:h-[62dvh]"
     >
       {rows.length === 0 && (

@@ -48,6 +48,9 @@ export type JoinFailure =
 
 export type LeaveReason = 'self' | 'kicked' | 'banned' | 'disconnected' | 'other';
 
+/** initial: newest page after a first join; gap: catching up after a reconnect. */
+export type HistoryDirection = 'initial' | 'gap';
+
 export type XmppEvent =
   | { type: 'connection'; state: ConnectionState }
   | { type: 'room-joining'; roomJid: string; nick: string }
@@ -58,7 +61,17 @@ export type XmppEvent =
   | { type: 'occupant-joined'; roomJid: string; nick: string; isSelf: boolean }
   | { type: 'occupant-left'; roomJid: string; nick: string }
   | { type: 'message'; message: ChatMessage }
-  | { type: 'message-error'; roomJid: string; condition: string };
+  | { type: 'message-error'; roomJid: string; condition: string }
+  | { type: 'history-loading'; roomJid: string; direction: HistoryDirection }
+  | {
+      type: 'history-loaded';
+      roomJid: string;
+      direction: HistoryDirection;
+      messages: ChatMessage[];
+      done: boolean;
+      complete: boolean;
+    }
+  | { type: 'history-failed'; roomJid: string; direction: HistoryDirection; condition: string };
 
 export type SendResult =
   | { ok: true; id: string }
@@ -71,6 +84,8 @@ export interface XmppClient {
   joinRoom(roomJid: string, nick: string): void;
   leaveRoom(roomJid: string): void;
   sendGroupchat(roomJid: string, body: string): SendResult;
+  /** Re-run history for a joined room after history-failed. No-op if not connected/joined or a query is queued/in flight. */
+  retryHistory(roomJid: string): void;
   subscribe(listener: (e: XmppEvent) => void): () => void;
   /** online / tab visible / "Try now": retry now if reconnecting, liveness-probe if connected, else no-op. */
   wake(trigger: WakeTrigger): void;
@@ -84,7 +99,16 @@ export interface XmppClientOptions {
   joinTimeoutMs?: number;
   iqTimeoutMs?: number;
   maxNickRetries?: number;
-  historyMaxStanzas?: number;
+  /** Messages per history page. Default 50 (= server max_result_limit). */
+  mamPageSize?: number;
+  /** Max catch-up pages after a reconnect. Default 5. */
+  mamMaxGapPages?: number;
+  /** Minimum gap (ms) between history queries, across rooms. Default 1_100 (server shaper is 1/s per user). */
+  mamMinIntervalMs?: number;
+  /** History query timeout (ms). Default 15_000. */
+  mamTimeoutMs?: number;
+  /** How far back history reaches (ms). Default 86_400_000 (ADR-004). */
+  historyWindowMs?: number;
   now?: () => number;
   newId?: () => string;
   backoff?: Partial<BackoffPolicy>;

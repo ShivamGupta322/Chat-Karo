@@ -148,7 +148,8 @@ TypeScript makes the XMPP stanza layer much safer; Vite is fast and simple; wide
 ```
 web/src/
 ├── xmpp/        client.ts (connect, reconnect w/ backoff), muc.ts (join/leave/send), types.ts,
-│                reconnect.ts (backoff + retry scheduler), lifecycle.ts (online/visible wake), socketClose.ts (close diagnostics)
+│                reconnect.ts (backoff + retry scheduler), lifecycle.ts (online/visible wake), socketClose.ts (close diagnostics),
+│                mam.ts (MAM history query builder + result/fin parsers, pure)
 ├── geo/         useLocation.ts (watchPosition + hysteresis), geohash helpers (ngeohash)
 ├── api/         geoService.ts (typed fetch wrapper)
 ├── state/       Zustand stores: session, room, messages, presence

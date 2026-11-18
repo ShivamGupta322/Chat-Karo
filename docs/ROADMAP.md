@@ -23,7 +23,7 @@ Learned in Phase 1 (carry into Phase 2):
 - [x] Vite + React + TS + Tailwind scaffold, ESLint, Vitest (slice 2a)
 - [ ] `xmpp/` module: connect, reconnect with backoff, join/leave MUC, send/receive groupchat
       (2a done: connect, join/leave, send/receive, nick-conflict retry, connection-lost; 2b-1 done: reconnect with
-      backoff, keepalive, liveness probe; 2b-2: MAM history)
+      backoff, keepalive, liveness probe; 2b-2a done: room history from MAM; 2b-2b next: "Load earlier messages")
 - [x] Chat page: MessageList, Composer, OccupantList (slice 2a)
 - [x] Branding & UI polish: product name "Nearby", design tokens, dark mode, chat bubbles, plain-language UI (slice 2a+, ADR-009)
 - [ ] `geo/useLocation` with permission/error states; dev-mode map location picker
@@ -38,12 +38,14 @@ Carry-forward for the next slices (from the 2a/2a+ reviews):
 - **2b (RESOLVED in 2b-1; Probe A: history copies on rejoin carry the same stanza-id, so `historyMaxStanzas` is kept):** clear the room timeline on sign-out/disconnect, but keep it across nick-conflict retries (regression test
   first). This fixes the stale "bob joined" notice after signing in again.
 - **2b-2:** MongooseIM adds `<stanza-id by=room>` to MUC messages, so de-duplicate MAM history against live messages by stanza-id.
-- **2b-2 BLOCKER (Probe B, 2026-11-17):** the MongooseIM 6.2.1 room archive is broken in our setup.
+- **2b-2 BLOCKER (RESOLVED in 2b-2a, ADR-011):** the MongooseIM 6.2.1 room archive was broken in our setup.
+  - Root cause: with no MUC rate limit configured, `mod_muc_room` does not keep the sender's activity record, so MAM gets timestamp 0.
+  - Workaround: a generous `user_message_shaper` on `mod_muc`, plus `async_writer.enabled = false` for the MUC archive. Re-check on any MongooseIM upgrade.
+  - Original symptoms (Probe B, 2026-11-17):
   - MUC MAM ids are tiny and counter-like (257, 513, … = microseconds 1, 2, … << 8), so result `<delay>` stamps read 1970-01-01.
   - A `start` = now−24h filter returns `count 0`.
   - After a restart, new messages collide with existing ids (`archive_muc_single_message_failed reason=duplicate_key`) and are silently dropped.
   - The container clock is correct.
-  - Find and fix the root cause (MUC MAM id/timestamp generation, async writer) before any history UI.
   - Also confirmed: `urn:xmpp:mam:2` is supported; `result@id` uses the live stanza-id format; a bogus `<after>` gives `item-not-found`.
 - **2c:** once the dev room form is gone, make the chat card fill the remaining height (`flex-1 min-h-0`), so the
   desktop page stops scrolling vertically.

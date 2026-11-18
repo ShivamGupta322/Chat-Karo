@@ -133,6 +133,15 @@ describe('MessageList', () => {
     expect(screen.getByText('Join a room to start chatting.')).toBeInTheDocument();
   });
 
+  it('sets aria-busy on the log only while busy', () => {
+    const { rerender } = render(<MessageList items={[]} emptyText="" busy />);
+    expect(screen.getByRole('log')).toHaveAttribute('aria-busy', 'true');
+    rerender(<MessageList items={[]} emptyText="" busy={false} />);
+    expect(screen.getByRole('log')).not.toHaveAttribute('aria-busy');
+    rerender(<MessageList items={[]} emptyText="" />);
+    expect(screen.getByRole('log')).not.toHaveAttribute('aria-busy');
+  });
+
   it('distinguishes own from other messages', () => {
     render(
       <MessageList

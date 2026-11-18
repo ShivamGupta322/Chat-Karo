@@ -42,3 +42,35 @@ export const CAPTURED_SUBJECT = parse(
 export const CAPTURED_ERROR = parse(
   "<message from='test1@muc.chaterl.localhost' to='alice@chaterl.localhost/1794-851070-904439-0d542a5db3522fe4' type='error' id='5265cec6-4d78-487f-9b78-3cb62e347b6c' xmlns='jabber:client'><body>second try</body><error code='404' type='cancel'><item-not-found xmlns='urn:ietf:params:xml:ns:xmpp-stanzas'/><text xmlns='urn:ietf:params:xml:ns:xmpp-stanzas'>This room is locked</text></error></message>",
 );
+
+// MAM v2 shapes as MongooseIM 6.2.1 returns them for a MUC archive query.
+export const MAM_STAMP = '2026-11-18T15:49:25.250549Z';
+
+export function mamResult(
+  opts: {
+    queryId?: string;
+    id?: string;
+    stamp?: string;
+    from?: string;
+    inner?: string;
+  } = {},
+): Element {
+  const {
+    queryId = 'q1',
+    id = 'CO4EUIA5RT81',
+    stamp = MAM_STAMP,
+    from = CAPTURED_ROOM,
+    inner = `<message from='${CAPTURED_ROOM}/bob' type='groupchat' xmlns='jabber:client'><body>hello from history</body><x xmlns='http://jabber.org/protocol/muc#user'><item jid='bob@chaterl.localhost' affiliation='member' role='participant'/></x></message>`,
+  } = opts;
+  return parse(
+    `<message from='${from}' to='alice@chaterl.localhost/r1' xmlns='jabber:client'><result xmlns='urn:xmpp:mam:2' queryid='${queryId}' id='${id}'><forwarded xmlns='urn:xmpp:forward:0'><delay xmlns='urn:xmpp:delay' stamp='${stamp}'/>${inner}</forwarded></result></message>`,
+  );
+}
+
+export const MAM_FIN_COMPLETE = parse(
+  "<iq from='test2@muc.chaterl.localhost' to='alice@chaterl.localhost/r1' id='iq1' type='result' xmlns='jabber:client'><fin xmlns='urn:xmpp:mam:2' complete='true'><set xmlns='http://jabber.org/protocol/rsm'><first index='0'>CO4EUIA5RT81</first><last>CO4EUIA5RT82</last><count>2</count></set></fin></iq>",
+);
+
+export const MAM_ERROR_ITEM_NOT_FOUND = parse(
+  "<iq from='test2@muc.chaterl.localhost' to='alice@chaterl.localhost/r1' id='iq1' type='error' xmlns='jabber:client'><error type='cancel'><item-not-found xmlns='urn:ietf:params:xml:ns:xmpp-stanzas'/></error></iq>",
+);

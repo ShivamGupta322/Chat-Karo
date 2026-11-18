@@ -114,7 +114,8 @@ browser styling. Nothing about branding had been decided before.
   longer imports from `state/`.
 
 ## ADR-010 — Web client resilience: reconnect and keepalive
-**Status:** Accepted (Phase 2, slice 2b-1, 2026-11-18)
+**Status:** Accepted (Phase 2, slice 2b-1, 2026-11-18). Amended by ADR-011: joins no longer request MUC history;
+history comes from MAM.
 **Context:** Sessions dropped on network blips, server restarts and backgrounded tabs. The 2a client then sent users back
 to the login form, lost their room and left ghost occupants holding their nickname on the server.
 **Decision:**
@@ -175,3 +176,82 @@ to the login form, lost their room and left ghost occupants holding their nickna
   ADR-008 shim. It is guarded, with a one-time warning if the field is missing. Re-check on any Strophe upgrade.
 - Under continuous visibility flapping the countdown keeps restarting, while real attempts happen at most every 5 s.
   That's acceptable load, but the countdown can mislead.
+
+## ADR-011 — Room history via MAM
+**Status:** Accepted (Phase 2, slice 2b-2a, 2026-11-18). Amends ADR-010.
+**Context / root cause (MongooseIM 6.2.1):**
+- `mod_muc_room:broadcast_room_packet` passes `timestamp => Activity#activity.message_time` to the MAM archive hook.
+- `store_user_activity` only keeps the sender's activity record when a MUC rate limit is configured (non-zero
+  `min_message_interval`/`min_presence_interval`, or a user shaper other than `none`). Ours had none.
+- So `message_time` stayed 0, and `mod_mam_utils:generate_message_id(0)` (via the `mongoose_mam_id:next_unique` NIF)
+  produced counter-like ids that restart from zero after every server restart.
+- Symptoms: 1970 `<delay>` stamps; `start` filters matched nothing; after a restart, `duplicate_key` collisions
+  (`archive_muc_single_message_failed`) silently dropped new messages from the archive.
+**Decision:**
+1. **Workaround: a mod_muc user message shaper.**
+   - `user_message_shaper = "muc_user_msg"` in `[modules.mod_muc]`, plus `[shaper.muc_user_msg] max_rate = 100_000` (bytes/s).
+   - Any configured user shaper makes `mod_muc_room` keep each sender's activity record, so `message_time` is the real
+     send time and MAM ids and stamps come from real time.
+   - This is a per-occupant rate limit on *room messages*, deliberately generous so it never throttles real chat. It
+     does **not** change MAM query limits: `mam_shaper` (1 query/s per user) is untouched.
+   - Risks:
+     - Removing it or setting it to `none` brings the bug back.
+     - Rooms now keep an activity record per active occupant (bounded by occupants).
+     - Re-check `store_user_activity`/`broadcast_room_packet` on any MongooseIM upgrade. Track an upstream issue
+       (not yet filed).
+2. **Synchronous MUC archive writes** (`[modules.mod_mam.muc] async_writer.enabled = false`).
+   - The room process is serial and archives each message before broadcasting it, so a message is either already in
+     MAM when our join is processed or delivered live after it, never neither.
+   - The default async writer flushes every 2 s, which left a window where a message could be in neither.
+   - Cost: each room message waits for a PostgreSQL insert. Fine at our scale.
+3. **History semantics:**
+   - **No MUC join history:** every join and rejoin sends `<history maxstanzas="0"/>` (supersedes ADR-010's
+     "`historyMaxStanzas` is kept on rejoin"). MAM is the only history source; mod_muc's in-memory history is lost on
+     restart and races with MAM.
+   - **Initial load:** MAM v2, `start` = now−24 h, RSM max 50 with `<before/>` (the newest ≤ 50), marked as history,
+     with the "Earlier messages" divider.
+   - **Reconnect catch-up:** `<after>lastSeenId</after>` paging forward (no `<before/>`), capped at 5 pages × 50. If the
+     cap is hit before `complete`, keep what was fetched and show "Some messages from while you were away couldn't be
+     loaded." No backward re-query.
+   - **Missing anchor:** `item-not-found` on the first catch-up page falls back to the initial load, once.
+   - **initialDone rule:** a catch-up runs only after a successful initial load. Until then every retry or rejoin is an
+     initial load, even if live messages set the last-seen id. An initial query never carries `<after>`.
+   - **Throttle:** a global client throttle of ≥ 1100 ms between MAM queries (the server's `mam_shaper` was seen to
+     delay rather than reject). At most one query queued or in flight per room. `resource-constraint` →
+     `history-failed`.
+   - **Anti-spoof:** a result is accepted only if the outer `from` is exactly the room bare JID and the queryid
+     matches. Stamps older than the 24 h start are dropped. Results never produce live `message` events.
+   - **De-dupe:** by id (the live `<stanza-id by=room>` equals MAM `result@id`), and within batches.
+   - **Ordering by position, not clock:**
+     - Live messages are stamped with the client clock and MAM with the server `<delay>`, so a cross-clock sort would
+       misorder on skewed devices.
+     - History is inserted at an anchor: the timeline length at the latest `room-joined`, advanced per insert.
+     - Live messages received after the join stay below it.
+     - Accepted edge: if the initial load failed and the connection then drops, the rejoin's initial load lands at
+       the new anchor, below the pre-drop live messages. No duplicates, but the order can look inverted.
+   - **Errors:** `history-failed` with "Couldn't load recent messages." and a manual "Try again" (`retryHistory`).
+     Never auto-retry, never throw.
+   - **isOwn** in history is nick-based: a user who rejoined as `alice-2` sees older `alice` messages as not-own. Accepted.
+   - **Window:** history is bounded to 24 h (ADR-004). Purging archive rows older than 24 h is Phase 4.
+4. **Legacy rows:** 11 MUC archive rows with 1970 stamps remain (lobby 7, test1 2, test3 2; counted, not deleted).
+   Deleting them needs the user's OK; the Phase 4 purge will remove them anyway. The client doesn't depend on deleting
+   them: the server `start` filter and the client's stamp floor keep them from rendering.
+**Live evidence (2026-11-18):**
+- **Archive fix:**
+  - ids are time-based after the fix (`CO4EUIA5RT81`, `CO4G5LO56CG1`, `CO4G5NLBN081`) with correct UTC stamps
+  - the 24 h `start` query count rose by one per message, and the live stanza-id equals `result@id`
+  - no `duplicate_key`/`archive_muc_single_message_failed` after a force-recreate, a restart and 9+ messages
+  - `async_writer.enabled = false` accepted at boot
+- **Catch-up:** alice's socket closed, then 3 messages sent 12 ms later → the rejoin sent one
+  `<after>CO4G5NLBN081</after>` query. All 3 arrived only via MAM and rendered exactly once, in order. They were sent
+  ~1.2 s before the query, inside the old async writer's window.
+- **Restart:** after `docker compose restart mongooseim` the app reconnected and rejoined within 20 s. After signing
+  in again, 6 messages rendered once each with real times and no 1970 stamps.
+- **Failure and retry:** a dropped initial query timed out (15 s) and showed the failure notice. "Try again" sent a
+  fresh `<before/>` query, and history rendered above a live message that had arrived meanwhile, without duplicates.
+- **Throttle:** no `resource-constraint` in normal use (minimum 30.9 s between MAM queries). The ≥ 1100 ms throttle
+  itself is covered by unit tests only.
+**Consequences:**
+- Phase 3 (private rooms, `default_room.public = false`): make sure the mod_mam_muc access rules still let occupants
+  query their room.
+- 2b-2b "Load earlier messages" builds on the RSM `first` id and the same throttle and one-in-flight guard.

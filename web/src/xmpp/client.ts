@@ -1,5 +1,6 @@
 import { domainOf, isValidRoomJid, normalizeNick } from './jid';
 import { DEFAULT_BACKOFF, createRetryScheduler } from './reconnect';
+import { buildMamQuery, isMamResultMessage, parseMamFin, parseMamResult, type MamItem } from './mam';
 import { acceptInstantRoom } from './roomCreation';
 import {
   buildGroupchat,
@@ -19,7 +20,9 @@ import type { TransportStatus, XmppTransport } from './transport';
 import {
   MAX_MESSAGE_LENGTH,
   type ConnectionError,
+  type ChatMessage,
   type ConnectionState,
+  type HistoryDirection,
   type JoinFailure,
   type LeaveReason,
   type SendResult,
@@ -37,6 +40,21 @@ interface TrackedRoom {
   configuring: boolean;
   occupants: Set<string>;
   timer: ReturnType<typeof setTimeout> | null;
+  /** Newest known stanza-id (live or history). Survives suspend/rejoin; drives the catch-up query. */
+  lastSeenId: string | null;
+  /** The initial (last 24 h) load has completed at least once, so lastSeenId is a valid gap anchor. */
+  initialDone: boolean;
+  /** A live message with a stanza-id arrived since the current history run started. */
+  liveSinceHistory: boolean;
+  /** The history query queued or in flight, with the result messages buffered so far. */
+  mam: {
+    queryId: string;
+    direction: HistoryDirection;
+    page: number;
+    buffer: MamItem[];
+    startMs: number;
+  } | null;
+  mamTimer: ReturnType<typeof setTimeout> | null;
 }
 
 const KNOWN_FAILURES: ReadonlySet<string> = new Set<JoinFailure>([
@@ -68,7 +86,11 @@ export function createXmppClient(
   const joinTimeoutMs = options.joinTimeoutMs ?? 10_000;
   const iqTimeoutMs = options.iqTimeoutMs ?? 10_000;
   const maxNickRetries = options.maxNickRetries ?? 3;
-  const historyMaxStanzas = options.historyMaxStanzas ?? 20;
+  const mamPageSize = options.mamPageSize ?? 50;
+  const mamMaxGapPages = options.mamMaxGapPages ?? 5;
+  const mamMinIntervalMs = options.mamMinIntervalMs ?? 1_100;
+  const mamTimeoutMs = options.mamTimeoutMs ?? 15_000;
+  const historyWindowMs = options.historyWindowMs ?? 86_400_000;
   const now = options.now ?? Date.now;
   const newId = options.newId ?? (() => crypto.randomUUID());
   const stableAfterMs = options.stableAfterMs ?? 60_000;
@@ -95,6 +117,8 @@ export function createXmppClient(
   let probe: object | null = null;
   let lastProbeAt = Number.NEGATIVE_INFINITY;
   let lastAttemptAt = Number.NEGATIVE_INFINITY;
+  // Earliest time the next history query may be sent. Global: the server's MAM shaper is per user.
+  let nextMamAt = Number.NEGATIVE_INFINITY;
   const rooms = new Map<string, TrackedRoom>();
   const listeners = new Set<(e: XmppEvent) => void>();
 
@@ -126,8 +150,17 @@ export function createXmppClient(
     stableTimer = null;
   }
 
+  function cancelHistory(room: TrackedRoom): void {
+    if (room.mamTimer !== null) {
+      clearTimeout(room.mamTimer);
+      room.mamTimer = null;
+    }
+    room.mam = null;
+  }
+
   function untrack(room: TrackedRoom): void {
     clearTimer(room);
+    cancelHistory(room);
     if (rooms.get(room.roomJid) === room) rooms.delete(room.roomJid);
   }
 
@@ -143,7 +176,7 @@ export function createXmppClient(
   }
 
   function sendJoin(room: TrackedRoom): void {
-    transport.send(buildJoinPresence(room.roomJid, room.nick, historyMaxStanzas));
+    transport.send(buildJoinPresence(room.roomJid, room.nick, 0));
     emit({ type: 'room-joining', roomJid: room.roomJid, nick: room.nick });
     startJoinTimer(room);
   }
@@ -152,6 +185,7 @@ export function createXmppClient(
     for (const room of rooms.values()) {
       if (room.state === 'suspended') continue;
       clearTimer(room);
+      cancelHistory(room);
       room.state = 'suspended';
       emit({ type: 'room-suspended', roomJid: room.roomJid });
     }
@@ -182,6 +216,7 @@ export function createXmppClient(
     if (state.status === 'disconnected' || state.status === 'idle') return;
     for (const room of [...rooms.values()]) {
       clearTimer(room);
+      cancelHistory(room);
       emit({ type: 'room-left', roomJid: room.roomJid, reason: 'disconnected' });
     }
     rooms.clear();
@@ -337,6 +372,130 @@ export function createXmppClient(
     room.occupants.add(room.nick);
     emit({ type: 'occupant-joined', roomJid: room.roomJid, nick: room.nick, isSelf: true });
     emit({ type: 'room-joined', roomJid: room.roomJid, nick: room.nick, created });
+    startHistory(room);
+  }
+
+  function startHistory(room: TrackedRoom): void {
+    if (state.status !== 'connected' || room.state !== 'joined' || room.mam || room.mamTimer) {
+      return;
+    }
+    room.liveSinceHistory = false;
+    // A live message may set lastSeenId before the first load finished; only a completed
+    // initial load makes the anchor a valid gap start.
+    const direction: HistoryDirection =
+      room.initialDone && room.lastSeenId !== null ? 'gap' : 'initial';
+    emit({ type: 'history-loading', roomJid: room.roomJid, direction });
+    schedulePage(room, direction, direction === 'gap' ? room.lastSeenId : null, 1);
+  }
+
+  function schedulePage(
+    room: TrackedRoom,
+    direction: HistoryDirection,
+    after: string | null,
+    page: number,
+  ): void {
+    const wait = Math.max(0, nextMamAt - now());
+    nextMamAt = now() + wait + mamMinIntervalMs;
+    if (wait === 0) {
+      sendPage(room, direction, after, page);
+      return;
+    }
+    // Mark the query as queued so retry/startHistory cannot double up.
+    // startMs is never used for parsing: results are ignored while queryId === ''.
+    room.mam = { queryId: '', direction, page, buffer: [], startMs: 0 };
+    room.mamTimer = setTimeout(() => {
+      room.mamTimer = null;
+      room.mam = null;
+      if (rooms.get(room.roomJid) !== room || room.state !== 'joined') return;
+      sendPage(room, direction, after, page);
+    }, wait);
+  }
+
+  function failHistory(room: TrackedRoom, direction: HistoryDirection, condition: string): void {
+    emit({ type: 'history-failed', roomJid: room.roomJid, direction, condition });
+  }
+
+  function sendPage(
+    room: TrackedRoom,
+    direction: HistoryDirection,
+    after: string | null,
+    page: number,
+  ): void {
+    const g = generation;
+    const queryId = newId();
+    const startMs = now() - historyWindowMs;
+    room.mam = { queryId, direction, page, buffer: [], startMs };
+    const query = buildMamQuery({
+      roomJid: room.roomJid,
+      iqId: newId(),
+      queryId,
+      startIso: new Date(startMs).toISOString(),
+      max: mamPageSize,
+      page: after === null ? { before: true } : { after },
+    });
+    void transport.sendIQ(query, mamTimeoutMs).then((res) => {
+      if (
+        generation !== g ||
+        rooms.get(room.roomJid) !== room ||
+        room.state !== 'joined' ||
+        room.mam?.queryId !== queryId
+      ) {
+        return;
+      }
+      const buffer = room.mam.buffer;
+      room.mam = null;
+      if (!res.ok) {
+        if (direction === 'gap' && page === 1 && res.condition === 'item-not-found') {
+          // The anchor is gone (e.g. purged): fall back to the newest page, once.
+          room.lastSeenId = null;
+          room.initialDone = false;
+          emit({ type: 'history-loading', roomJid: room.roomJid, direction: 'initial' });
+          schedulePage(room, 'initial', null, 1);
+          return;
+        }
+        failHistory(room, direction, res.condition);
+        return;
+      }
+      const fin = parseMamFin(res.stanza);
+      if (fin === null) {
+        failHistory(room, direction, 'bad-response');
+        return;
+      }
+      const messages: ChatMessage[] = buffer.map((item) => ({
+        id: item.id,
+        roomJid: room.roomJid,
+        nick: item.nick,
+        body: item.body,
+        sentAt: item.sentAt,
+        isHistory: true,
+        isOwn: item.nick !== null && item.nick === room.nick,
+      }));
+      const lastItem = buffer.at(-1);
+      if (!room.liveSinceHistory && lastItem !== undefined) room.lastSeenId = lastItem.id;
+      if (direction === 'initial') {
+        room.initialDone = true;
+        emit({
+          type: 'history-loaded',
+          roomJid: room.roomJid,
+          direction,
+          messages,
+          done: true,
+          complete: fin.complete,
+        });
+        return;
+      }
+      const done =
+        fin.complete || buffer.length === 0 || fin.last === null || page >= mamMaxGapPages;
+      emit({
+        type: 'history-loaded',
+        roomJid: room.roomJid,
+        direction,
+        messages,
+        done,
+        complete: fin.complete,
+      });
+      if (!done) schedulePage(room, 'gap', fin.last, page + 1);
+    });
   }
 
   function handleJoinedPresence(room: TrackedRoom, p: MucPresence): void {
@@ -380,6 +539,19 @@ export function createXmppClient(
     const bare = slash < 0 ? from : from.slice(0, slash);
     const room = rooms.get(bare);
     if (!room) return;
+    if (isMamResultMessage(el)) {
+      // Never a live message. Only accepted while our own query is in flight (anti-spoof inside).
+      const mam = room.mam;
+      if (mam && mam.queryId !== '') {
+        const item = parseMamResult(el, {
+          roomJid: room.roomJid,
+          queryId: mam.queryId,
+          notBefore: mam.startMs,
+        });
+        if (item !== null && mam.buffer.length < mamPageSize) mam.buffer.push(item);
+      }
+      return;
+    }
     if (type === 'error') {
       emit({ type: 'message-error', roomJid: room.roomJid, condition: parseErrorCondition(el) });
       return;
@@ -387,6 +559,10 @@ export function createXmppClient(
     const m = parseGroupchat(el);
     if (!m) return;
     const sentAt = m.delayedAt ?? now();
+    if (m.stanzaId !== null) {
+      room.lastSeenId = m.stanzaId;
+      room.liveSinceHistory = true;
+    }
     emit({
       type: 'message',
       message: {
@@ -508,6 +684,11 @@ export function createXmppClient(
         configuring: false,
         occupants: new Set(),
         timer: null,
+        lastSeenId: null,
+        initialDone: false,
+        liveSinceHistory: false,
+        mam: null,
+        mamTimer: null,
       };
       rooms.set(roomJid, room);
       sendJoin(room);
@@ -534,6 +715,11 @@ export function createXmppClient(
       const id = newId();
       transport.send(buildGroupchat(roomJid, text, id));
       return { ok: true, id };
+    },
+
+    retryHistory(roomJid) {
+      const room = rooms.get(roomJid);
+      if (room) startHistory(room);
     },
 
     subscribe(listener) {

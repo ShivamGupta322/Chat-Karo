@@ -5,7 +5,7 @@ import { App } from '../../src/App';
 import { initialRoomState, useRoomStore } from '../../src/state/room';
 import { useSessionStore } from '../../src/state/session';
 import { XmppProvider, createXmppClient } from '../../src/xmpp';
-import { ROOM, groupchat, parse, presence } from '../fixtures/stanzas';
+import { ROOM, groupchat, mamResult, parse, presence } from '../fixtures/stanzas';
 import { createFakeTransport } from '../helpers/fakeTransport';
 
 describe('chat flow', () => {
@@ -169,4 +169,135 @@ describe('chat flow', () => {
     expect(screen.queryByText('carol joined')).toBeNull();
     expect(screen.queryByText('old message')).toBeNull();
   }, 20_000);
+
+  describe('room history', () => {
+    const recent = (): string => new Date(Date.now() - 3_600_000).toISOString();
+    const finIq = (complete: boolean, last: string): Element =>
+      parse(
+        `<iq type="result"><fin xmlns="urn:xmpp:mam:2" complete="${String(complete)}"><set xmlns="http://jabber.org/protocol/rsm"><first index="0">${last}</first><last>${last}</last></set></fin></iq>`,
+      );
+    const queryIdOf = (t: ReturnType<typeof createFakeTransport>, i: number): string =>
+      t.iqs[i]?.querySelector('query')?.getAttribute('queryid') ?? '';
+    const pushResult = (
+      t: ReturnType<typeof createFakeTransport>,
+      i: number,
+      id: string,
+      nick: string,
+      body: string,
+    ): void => {
+      act(() => {
+        t.pushStanza(
+          mamResult({
+            queryId: queryIdOf(t, i),
+            id,
+            stamp: recent(),
+            from: ROOM,
+            inner: `<message from="${ROOM}/${nick}" type="groupchat"><body>${body}</body></message>`,
+          }),
+        );
+      });
+    };
+    const answer = async (
+      t: ReturnType<typeof createFakeTransport>,
+      i: number,
+      complete: boolean,
+      last: string,
+    ): Promise<void> => {
+      await act(async () => {
+        t.resolveIq(i, { ok: true, stanza: finIq(complete, last) });
+        await Promise.resolve();
+      });
+    };
+
+    it('shows the last messages from the archive with the divider, and de-dupes a later live copy', async () => {
+      const t = mount();
+      const user = userEvent.setup({ delay: null });
+      await signInAndJoin(t, user);
+      expect(t.iqs).toHaveLength(1);
+      expect(screen.getByText('Loading recent messages…', { selector: 'p' })).toBeInTheDocument();
+      expect(screen.getByRole('log')).toHaveAttribute('aria-busy', 'true');
+
+      pushResult(t, 0, 'H1', 'bob', 'first from history');
+      pushResult(t, 0, 'H2', 'carol', 'second from history');
+      await answer(t, 0, true, 'H2');
+
+      const log = screen.getByRole('log');
+      expect(within(log).getByText('first from history')).toBeInTheDocument();
+      expect(within(log).getByText('second from history')).toBeInTheDocument();
+      expect(within(log).getByRole('separator')).toBeInTheDocument();
+      expect(log).not.toHaveAttribute('aria-busy');
+      expect(screen.queryByText('Loading recent messages…')).toBeNull();
+
+      act(() => {
+        t.pushStanza(
+          groupchat(
+            'carol',
+            'second from history',
+            `<stanza-id xmlns="urn:xmpp:sid:0" id="H2" by="${ROOM}"/>`,
+            'live-copy',
+          ),
+        );
+      });
+      expect(within(log).getAllByText('second from history')).toHaveLength(1);
+    }, 20_000);
+
+    it('shows a retry when history cannot load and asks again on "Try again"', async () => {
+      const t = mount();
+      const user = userEvent.setup({ delay: null });
+      await signInAndJoin(t, user);
+      await act(async () => {
+        t.resolveIq(0, { ok: false, condition: 'resource-constraint' });
+        await Promise.resolve();
+      });
+      expect(screen.getByText("Couldn't load recent messages.")).toBeInTheDocument();
+      await user.click(screen.getByRole('button', { name: 'Try again' }));
+      // The shared throttle may hold the retry back for up to 1.1 s.
+      await vi.waitFor(
+        () => {
+          expect(t.iqs).toHaveLength(2);
+        },
+        { timeout: 3_000 },
+      );
+      expect(screen.queryByText("Couldn't load recent messages.")).toBeNull();
+      expect(screen.getByText('Loading recent messages…', { selector: 'p' })).toBeInTheDocument();
+    }, 20_000);
+
+    it('after a reconnect, fetches only what was missed, forward from the last id, without duplicates', async () => {
+      const t = mount();
+      const user = userEvent.setup({ delay: null });
+      await signInAndJoin(t, user);
+      pushResult(t, 0, 'H1', 'bob', 'before the outage');
+      await answer(t, 0, true, 'H1');
+
+      vi.useFakeTimers();
+      act(() => {
+        t.pushStatus({ kind: 'disconnected' });
+      });
+      act(() => {
+        vi.advanceTimersByTime(1000);
+      });
+      act(() => {
+        t.pushStatus({ kind: 'connecting' });
+        t.pushStatus({ kind: 'connected', jid: 'alice@chaterl.localhost/r2' });
+      });
+      act(() => {
+        t.pushStanza(presence('alice', ['110']));
+      });
+      act(() => {
+        vi.advanceTimersByTime(1_200);
+      });
+      expect(t.iqs).toHaveLength(2);
+      const gap = t.iqs[1];
+      expect(gap?.querySelector('after')?.textContent).toBe('H1');
+      expect(gap?.querySelector('before')).toBeNull();
+
+      pushResult(t, 1, 'H1', 'bob', 'before the outage');
+      pushResult(t, 1, 'H3', 'carol', 'while you were away');
+      await answer(t, 1, true, 'H3');
+
+      const log = screen.getByRole('log');
+      expect(within(log).getAllByText('before the outage')).toHaveLength(1);
+      expect(within(log).getAllByText('while you were away')).toHaveLength(1);
+    }, 20_000);
+  });
 });

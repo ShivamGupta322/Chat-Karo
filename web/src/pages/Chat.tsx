@@ -1,13 +1,14 @@
 import { AppHeader } from "../components/AppHeader";
 import { ConnectionBanner } from "../components/ConnectionBanner";
 import { Composer } from "../components/Composer";
+import { HistoryStatus } from "../components/HistoryStatus";
 import { MessageList } from "../components/MessageList";
 import { OccupantList } from "../components/OccupantList";
 import { RoomForm } from "../components/RoomForm";
 import { useRoomStore } from "../state/room";
 import { selectSessionJid, useSessionStore } from "../state/session";
 import { roomLabel } from "../ui/addresses";
-import { CONNECTION_TEXT, describeJoinFailure } from "../ui/text";
+import { CONNECTION_TEXT, HISTORY_TEXT, describeJoinFailure } from "../ui/text";
 import { localpartOf, useXmppClient } from "../xmpp";
 
 export function Chat({ mucDomain }: { mucDomain: string }): React.JSX.Element {
@@ -74,11 +75,22 @@ export function Chat({ mucDomain }: { mucDomain: string }): React.JSX.Element {
             aria-label="Chat"
             className="min-w-0 rounded-2xl border border-line bg-surface shadow-sm"
           >
+            {joined && (
+              <HistoryStatus
+                history={room.history}
+                onRetry={() => {
+                  if (room.roomJid !== null) client.retryHistory(room.roomJid);
+                }}
+              />
+            )}
             <MessageList
               items={room.timeline}
+              busy={room.history.loading}
               emptyText={
                 joined
-                  ? "No messages yet. Say hello!"
+                  ? room.history.loading
+                    ? HISTORY_TEXT.emptyLoading
+                    : "No messages yet. Say hello!"
                   : room.status === "reconnecting"
                     ? CONNECTION_TEXT.roomReconnectingEmpty
                     : "Join a room to start chatting."

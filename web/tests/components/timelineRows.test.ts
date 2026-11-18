@@ -72,6 +72,18 @@ describe('toTimelineRows', () => {
     expect(rows.map((r) => r.kind)).toEqual(['message', 'divider']);
   });
 
+  it('after a catch-up the single divider sits below the caught-up block', () => {
+    const rows = toTimelineRows([
+      msg('old', 'bob'),
+      msg('gap1', 'carol', { history: true }),
+      msg('gap2', 'carol', { history: true }),
+      msg('live', 'bob'),
+    ]);
+    expect(rows.map((r) => r.kind)).toEqual(['message', 'message', 'message', 'divider', 'message']);
+    expect(rows.filter((r) => r.kind === 'divider')).toHaveLength(1);
+    expect(rows[3]?.key).toBe('earlier-divider');
+  });
+
   it('turns nick-null messages into system rows', () => {
     expect(toTimelineRows([msg('1', null)])).toEqual([
       { kind: 'system', key: 'm-1', text: 'body-1', at: 0 },

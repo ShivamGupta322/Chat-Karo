@@ -13,6 +13,7 @@ function fakeClient(state: ConnectionState): { client: XmppClient; disconnect: (
     sendGroupchat: (): SendResult => ({ ok: false, error: 'not-joined' }),
     subscribe: vi.fn(() => () => undefined),
     wake: vi.fn(),
+    retryHistory: vi.fn(),
   };
   return { client, disconnect };
 }
