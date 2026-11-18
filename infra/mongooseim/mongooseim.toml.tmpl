@@ -96,12 +96,20 @@
   backend = "rdbms"
   default_room.persistent = true
   default_room.public = true
+  # Workaround for a MongooseIM 6.2.1 bug: with no MUC rate limit configured, mod_muc_room does not keep the
+  # sender's activity record, so MAM archives room messages with timestamp 0 (1970 stamps, counter-like ids
+  # that collide after a restart → duplicate_key, messages dropped). Any user shaper makes it keep the record.
+  # The shaper is deliberately generous so it never throttles real chat. See ADR-011.
+  user_message_shaper = "muc_user_msg"
 
 [modules.mod_mam]
   backend = "rdbms"
 
   [modules.mod_mam.muc]
     host = "muc.@HOST@"
+    # Archive room messages synchronously, before the room broadcasts them, so a message is either in MAM
+    # or delivered live after a (re)join — never in neither (the async writer flushes every 2 s). ADR-011.
+    async_writer.enabled = false
 
 # --- Shapers, ACL, access rules ------------------------------------------------------------------
 
@@ -110,6 +118,11 @@
 
 [shaper.fast]
   max_rate = 50_000
+
+# Per-user, per-room message shaper for mod_muc (bytes/second). Generous on purpose: it exists to work around the
+# MongooseIM 6.2.1 MUC archive timestamp bug (see [modules.mod_muc] and ADR-011), not to limit chat.
+[shaper.muc_user_msg]
+  max_rate = 100_000
 
 [shaper.mam_shaper]
   max_rate = 1
