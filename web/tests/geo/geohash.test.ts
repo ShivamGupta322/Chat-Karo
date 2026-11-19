@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { encodeGeohash, isValidLatLng } from '../../src/geo/geohash';
+import { decodeGeohashBounds, encodeGeohash, isValidLatLng, wrapLng } from '../../src/geo/geohash';
 import { VECTORS } from './vectors';
 
 describe('encodeGeohash', () => {
@@ -74,5 +74,70 @@ describe('isValidLatLng', () => {
     expect(isValidLatLng(0, -180.1)).toBe(false);
     expect(isValidLatLng(Number.NaN, 0)).toBe(false);
     expect(isValidLatLng(0, Number.POSITIVE_INFINITY)).toBe(false);
+  });
+});
+
+describe('decodeGeohashBounds', () => {
+  const BOUNDS: readonly [string, number, number, number, number][] = [
+    ['u4pruyd', 57.64801025390625, 10.40679931640625, 57.649383544921875, 10.408172607421875],
+    ['u4pruye', 57.64801025390625, 10.408172607421875, 57.649383544921875, 10.4095458984375],
+    ['gcpvj0d', 51.50665283203125, -0.12908935546875, 51.508026123046875, -0.127716064453125],
+    ['s000000', 0, 0, 0.001373291015625, 0.001373291015625],
+    ['0000000', -90, -180, -89.99862670898438, -179.99862670898438],
+    ['zzzzzzz', 89.99862670898438, 179.99862670898438, 90, 180],
+    ['u', 45, 0, 90, 45],
+  ];
+
+  it.each(BOUNDS)('%s covers the expected box', (geohash, south, west, north, east) => {
+    const res = decodeGeohashBounds(geohash);
+    expect(res.ok).toBe(true);
+    if (!res.ok) return;
+    expect(res.bounds.south).toBe(south);
+    expect(res.bounds.west).toBe(west);
+    expect(res.bounds.north).toBe(north);
+    expect(res.bounds.east).toBe(east);
+  });
+
+  it('neighbouring cells share an edge exactly', () => {
+    const a = decodeGeohashBounds('u4pruyd');
+    const b = decodeGeohashBounds('u4pruye');
+    expect(a.ok && b.ok && a.bounds.east === b.bounds.west).toBe(true);
+  });
+
+  it.each(VECTORS)('(%f, %f): the %s box contains the point and its centre re-encodes to it', (lat, lng, expected) => {
+    const res = decodeGeohashBounds(expected);
+    expect(res.ok).toBe(true);
+    if (!res.ok) return;
+    const { south, west, north, east } = res.bounds;
+    expect(lat >= south && lat <= north).toBe(true);
+    expect(lng >= west && lng <= east).toBe(true);
+    expect(encodeGeohash((south + north) / 2, (west + east) / 2, 7)).toEqual({
+      ok: true,
+      geohash: expected,
+    });
+  });
+
+  it.each(['', 'U4PRUYD', 'u4pruya', 'u4prui', 'u4pruydqqvj8x'])('rejects %j', (bad) => {
+    expect(decodeGeohashBounds(bad)).toEqual({ ok: false, error: 'invalid-geohash' });
+  });
+});
+
+describe('wrapLng', () => {
+  it.each([
+    [10, 10],
+    [180, 180],
+    [-180, -180],
+    [190, -170],
+    [-190, 170],
+    [370, 10],
+    [-370, -10],
+    [540, -180],
+  ])('%f -> %f', (input, expected) => {
+    expect(wrapLng(input)).toBe(expected);
+  });
+
+  it('returns non-finite values unchanged', () => {
+    expect(wrapLng(NaN)).toBeNaN();
+    expect(wrapLng(Infinity)).toBe(Infinity);
   });
 });

@@ -118,6 +118,7 @@ export const AREA_TEXT = {
   heading: 'Your area',
   areaLabel: (code: string): string => `Area ${code}`,
   testSpotBadge: 'Test spot',
+  left: 'You left the room',
   checking: 'Checking location access…',
   idle: 'Nearby uses your location to put you in a chat with people around you. Your exact location is never shared or stored.',
   share: 'Share my location',

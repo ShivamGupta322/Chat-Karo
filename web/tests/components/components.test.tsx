@@ -133,6 +133,11 @@ describe('MessageList', () => {
     expect(screen.getByText('Join a room to start chatting.')).toBeInTheDocument();
   });
 
+  it('renders no empty list item for an empty emptyText', () => {
+    render(<MessageList items={[]} emptyText="" />);
+    expect(within(screen.getByRole('log')).queryAllByRole('listitem')).toHaveLength(0);
+  });
+
   it('sets aria-busy on the log only while busy', () => {
     const { rerender } = render(<MessageList items={[]} emptyText="" busy />);
     expect(screen.getByRole('log')).toHaveAttribute('aria-busy', 'true');

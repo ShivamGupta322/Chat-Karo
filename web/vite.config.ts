@@ -31,6 +31,8 @@ export default defineConfig({
   plugins: [stropheNodeShims(), react(), tailwindcss()],
   envDir: '..',
   server: { port: 5173, strictPort: true },
+  // Pre-bundle at server start so opening the map doesn't trigger a re-optimise reload, which would lose the dev spot.
+  optimizeDeps: { include: ['leaflet', 'react-leaflet'] },
   test: {
     environment: 'jsdom',
     setupFiles: ['./tests/setup.ts'],

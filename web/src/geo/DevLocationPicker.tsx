@@ -1,5 +1,6 @@
-import { useId, useRef, useState, type FormEvent } from 'react';
-import { DEV_LOCATION_TEXT } from './devLocationText';
+import { lazy, Suspense, useId, useRef, useState, type FormEvent } from 'react';
+import { DEV_LOCATION_TEXT, DEV_MAP_TEXT } from './devLocationText';
+import { DevMapBoundary } from './DevMapBoundary';
 import { DEV_PRESETS } from './devPresets';
 import type { DevOverride } from './useArea';
 
@@ -14,6 +15,12 @@ const INPUT =
 const BUTTON =
   'rounded-lg border border-field bg-surface px-3 py-1.5 text-sm hover:bg-surface-sunken';
 
+// Dev only. The literal guard folds to `null` in production builds, so Rollup drops the dynamic import and
+// emits no map chunk (a bare top-level lazy() call is not provably pure and would keep it).
+const DevMap = import.meta.env.DEV
+  ? lazy(() => import('./DevMap').then((m) => ({ default: m.DevMap })))
+  : null;
+
 /** Plain decimal numbers only; Number('') is 0, so empty input must be rejected explicitly. */
 function parseDecimal(raw: string): number | null {
   const text = raw.trim();
@@ -25,18 +32,32 @@ function parseDecimal(raw: string): number | null {
  * Dev-only test locations. Lives in geo/ because it handles raw numbers: they exist only in the two input
  * fields' state and are cleared once a spot has been applied. Only a Cell reaches the rest of the app.
  */
-export function DevLocationPicker({ override }: { override: DevOverride }): React.JSX.Element {
+export function DevLocationPicker({
+  override,
+  mapTileUrl,
+}: {
+  override: DevOverride;
+  mapTileUrl: string | null;
+}): React.JSX.Element {
   const latId = useId();
   const lngId = useId();
   const [lat, setLat] = useState('');
   const [lng, setLng] = useState('');
   const [invalid, setInvalid] = useState(false);
+  const [open, setOpen] = useState(false);
   const firstPreset = useRef<HTMLButtonElement>(null);
 
   const apply = (point: { lat: number; lng: number }): boolean => {
     const res = override.set(point);
     setInvalid(!res.ok);
     return res.ok;
+  };
+
+  const pick = (point: { lat: number; lng: number }): void => {
+    if (apply(point)) {
+      setLat('');
+      setLng('');
+    }
   };
 
   const onSubmit = (e: FormEvent): void => {
@@ -52,7 +73,12 @@ export function DevLocationPicker({ override }: { override: DevOverride }): Reac
   };
 
   return (
-    <details className="rounded-2xl border border-line bg-surface p-3 shadow-sm sm:p-4">
+    <details
+      className="rounded-2xl border border-line bg-surface p-3 shadow-sm sm:p-4"
+      onToggle={(e) => {
+        setOpen(e.currentTarget.open);
+      }}
+    >
       <summary className="cursor-pointer text-sm font-semibold">
         {DEV_LOCATION_TEXT.summary}
       </summary>
@@ -65,10 +91,7 @@ export function DevLocationPicker({ override }: { override: DevOverride }): Reac
               type="button"
               className={BUTTON}
               onClick={() => {
-                if (apply(p.point)) {
-                  setLat('');
-                  setLng('');
-                }
+                pick(p.point);
               }}
             >
               {PRESET_LABEL[p.id]}
@@ -138,6 +161,24 @@ export function DevLocationPicker({ override }: { override: DevOverride }): Reac
               {DEV_LOCATION_TEXT.useReal}
             </button>
           </div>
+        )}
+        {mapTileUrl === null ? (
+          <p className="m-0 text-sm text-ink-muted">{DEV_MAP_TEXT.noTiles}</p>
+        ) : (
+          DevMap !== null &&
+          open && (
+            <DevMapBoundary>
+              <Suspense
+                fallback={
+                  <p role="status" className="m-0 text-sm text-ink-muted">
+                    {DEV_MAP_TEXT.loading}
+                  </p>
+                }
+              >
+                <DevMap tileUrl={mapTileUrl} cell={override.cell} onPick={pick} />
+              </Suspense>
+            </DevMapBoundary>
+          )
         )}
       </div>
     </details>

@@ -11,7 +11,13 @@ const container = document.getElementById('root');
 if (!container) throw new Error('#root not found');
 const root = createRoot(container);
 
-const result = parseConfig(import.meta.env);
+const result = parseConfig({
+  VITE_XMPP_WS_URL: import.meta.env.VITE_XMPP_WS_URL,
+  VITE_XMPP_DOMAIN: import.meta.env.VITE_XMPP_DOMAIN,
+  VITE_XMPP_MUC_DOMAIN: import.meta.env.VITE_XMPP_MUC_DOMAIN,
+  // Dev only: the literal DEV guard folds to undefined in production builds, so the tile URL never ships.
+  VITE_MAP_TILE_URL: import.meta.env.DEV ? import.meta.env.VITE_MAP_TILE_URL : undefined,
+});
 
 if (!result.ok) {
   root.render(<ConfigError errors={result.errors} />);
@@ -24,7 +30,11 @@ if (!result.ok) {
   root.render(
     <React.StrictMode>
       <XmppProvider client={client}>
-        <App xmppDomain={config.xmppDomain} mucDomain={config.mucDomain} />
+        <App
+          xmppDomain={config.xmppDomain}
+          mucDomain={config.mucDomain}
+          mapTileUrl={config.mapTileUrl}
+        />
       </XmppProvider>
     </React.StrictMode>,
   );

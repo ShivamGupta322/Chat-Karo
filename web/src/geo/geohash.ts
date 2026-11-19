@@ -69,3 +69,52 @@ export function encodeGeohash(lat: number, lng: number, precision: number): Geoh
   }
   return { ok: true, geohash: out };
 }
+
+export interface GeohashBounds {
+  readonly south: number;
+  readonly west: number;
+  readonly north: number;
+  readonly east: number;
+}
+export type GeohashBoundsResult =
+  | { ok: true; bounds: GeohashBounds }
+  | { ok: false; error: 'invalid-geohash' };
+
+/**
+ * The box a geohash covers. Inverts encodeGeohash's bit order (longitude first). Lowercase base32 only,
+ * length 1..12. Never throws.
+ */
+export function decodeGeohashBounds(geohash: string): GeohashBoundsResult {
+  if (geohash.length < 1 || geohash.length > MAX_PRECISION) {
+    return { ok: false, error: 'invalid-geohash' };
+  }
+  let latLo = -90;
+  let latHi = 90;
+  let lngLo = -180;
+  let lngHi = 180;
+  let evenBit = true;
+  for (const ch of geohash) {
+    const index = BASE32.indexOf(ch);
+    if (index < 0) return { ok: false, error: 'invalid-geohash' };
+    for (let shift = 4; shift >= 0; shift -= 1) {
+      const upper = ((index >> shift) & 1) === 1;
+      if (evenBit) {
+        const mid = (lngLo + lngHi) / 2;
+        if (upper) lngLo = mid;
+        else lngHi = mid;
+      } else {
+        const mid = (latLo + latHi) / 2;
+        if (upper) latLo = mid;
+        else latHi = mid;
+      }
+      evenBit = !evenBit;
+    }
+  }
+  return { ok: true, bounds: { south: latLo, west: lngLo, north: latHi, east: lngHi } };
+}
+
+/** In [-180, 180] stays as is; other finite values wrap into [-180, 180); non-finite is returned unchanged. */
+export function wrapLng(lng: number): number {
+  if (!Number.isFinite(lng) || (lng >= -180 && lng <= 180)) return lng;
+  return ((((lng + 180) % 360) + 360) % 360) - 180;
+}

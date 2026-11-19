@@ -207,4 +207,24 @@ describe('useArea', () => {
     expect(json).not.toContain('10.4');
     expect(json).not.toMatch(/lat|lng/i);
   });
+
+  it('dev.cell is null, then the cell after set (same ref on a same-cell set), then null after clear', () => {
+    const { result } = mountLocated();
+    expect(result.current.dev.cell).toBeNull();
+    act(() => {
+      result.current.dev.set(B);
+    });
+    const cell = result.current.dev.cell;
+    expect(cell).toEqual({ precision: 7, geohash: 'u4pruye' });
+    const dev = result.current.dev;
+    act(() => {
+      result.current.dev.set({ lat: 57.6491, lng: 10.4088 });
+    });
+    expect(result.current.dev.cell).toBe(cell);
+    expect(result.current.dev).toBe(dev);
+    act(() => {
+      result.current.dev.clear();
+    });
+    expect(result.current.dev.cell).toBeNull();
+  });
 });

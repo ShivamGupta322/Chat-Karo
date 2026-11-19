@@ -431,7 +431,7 @@ assigns rooms and coordinates are never stored; this slice has to compute the ce
 - `persistent = true` keeps every visited cell room in PostgreSQL.
 - The area code on screen shows up in screenshots and GIFs.
 - Being in a cell room tells co-occupants your ~150 m cell. That is the product, but it is worth saying plainly.
-- In 2c-2, map tile requests will reveal the viewed area.
+- In 2c-2, map tile requests will reveal the viewed area (see ADR-014).
 **Consequences:**
 - Signing out unmounts the chat, which clears the watch and forgets any dev spot; after signing in again a granted
   permission starts the watch automatically.
@@ -464,3 +464,84 @@ assigns rooms and coordinates are never stored; this slice has to compute the ce
 - Load-earlier scroll preservation was not re-measured live after the layout change (ADR-012 tests pass; scroll container
   unchanged).
 - The README demo was not run from a clean checkout.
+
+## ADR-014 — Dev-only Leaflet map picker
+**Date:** 2026-11-19 · **Status:** accepted
+**Context:** The dev "Test locations" panel only had presets and typed fields. A map makes testing neighbouring cells quicker.
+It must never reach a production build and must not show or keep the exact clicked point.
+**Decisions:**
+1. **Dependencies (exact pins):**
+   - `leaflet` 1.9.4 (BSD-2-Clause) and `react-leaflet` 4.2.1 (Hippocratic-2.1) in `dependencies`; `@types/leaflet` 1.9.22 (MIT)
+     in `devDependencies`. Transitive: `@react-leaflet/core` 2.1.0, `@types/geojson`.
+   - react-leaflet 5 needs React 19, which ADR-008 rules out. `@types/leaflet` is needed because leaflet 1.9.4 ships no types
+     and react-leaflet's declarations import from it (otherwise the types become `any` and the no-unsafe lint rules fail).
+   - Hippocratic-2.1 is "ethical source" and **not OSI-approved**. That is fine for a portfolio, but some employers disallow
+     non-OSI licences. It is mitigated because nothing from react-leaflet ships in production.
+   - They are `dependencies` because they are browser runtime code and the future product map (ADR-003) will use them.
+     Keeping them out of production is enforced by the DEV guard and the dist grep below.
+2. **Lazy and dev-only mechanism:**
+   - `DevLocationPicker` creates the lazy component only behind a literal `import.meta.env.DEV ? lazy(...) : null`
+     ternary. A bare top-level `lazy()` call is not provably pure, so Rollup would keep the dynamic import and emit a chunk.
+   - The Leaflet CSS is imported only in `DevMap.tsx`, so it travels with the lazy chunk.
+   - The map mounts only while the `<details>` panel is open and unmounts on close: no chunk load or tile request until
+     asked, and Leaflet never initialises in a zero-size hidden container.
+   - `main.tsx` passes explicit env keys to `parseConfig`, with `VITE_MAP_TILE_URL` behind `import.meta.env.DEV`.
+     Passing the whole env object made Rollup keep every key that `parseConfig` reads as a literal, so the tile URL
+     would have shipped.
+   - An ESLint `LEAFLET` restriction allows only `src/geo/DevMap.tsx` to import leaflet or react-leaflet.
+   - The check that counts is the production build grep (see Live evidence): no leaflet, tile host or map strings in `dist`.
+     The validator's own error text and `{z}` still ship; that is config validation, not map code.
+3. **A cell rectangle, not a point marker.** `DevMap` draws only the whole cell (from `decodeGeohashBounds`) and has no
+   state, no marker and no `locate`. It is centred on the dev cell, or on test spot A when none is set, never on the device.
+   A clicked point exists only in the Leaflet event, then `onPick`, then `override.set`, then a `Cell`. A world-wrapped
+   click longitude goes through `wrapLng` first, or `cellFor` would reject it.
+4. **Tile privacy and the OSM policy.** Each tile request tells the tile server the viewed area plus the IP (dev only).
+   Keep the on-map attribution, no `no-referrer` policy (OSM requires a Referer), no prefetching or offline caching.
+   The attribution is **fixed in code** (`DEV_MAP_TEXT.attribution`): Leaflet renders it as HTML, so an env-supplied value
+   would be an injection path. Anyone switching tile providers edits that constant.
+5. **Accessibility.** The map is optional, last in the panel, and has `role="region"`, a label and a described-by hint.
+   The presets and typed fields are the complete keyboard path (arrow keys and +/- also work when the map is focused).
+   Wheel zoom is off so the page still scrolls. Loading and failure are `role="status"` text; an error boundary keeps a
+   failed chunk from taking down the chat.
+6. **`optimizeDeps.include`** for `leaflet` and `react-leaflet`: without it the first map open would trigger a Vite
+   re-optimise and a page reload, losing the dev spot.
+7. **Fold-ins from 2c-1:** `desiredRoomJid` is computed directly (a string, so effect deps compare by value); the
+   `useMemo` is dropped (keying it on `cell?.geohash` while reading `cell` fails exhaustive-deps). "Join again" moved out of the status
+   paragraph with focus handed to the status line; no empty `<li>` for an empty message-list text; `AREA_TEXT.left`.
+**Live evidence (2026-11-19, `npm run dev`, MongooseIM 6.2.1, OSM tiles; frames captured in the app):**
+- Opening the panel lazy-loaded the map without a page reload. The page had just re-optimised dependencies after the
+  lockfile change, and no second reload happened. OSM tiles loaded and the attribution was visible. The container had
+  `role="region"`, the label "Test location map" and `aria-describedby` pointing at the hint. No markers were drawn.
+- A click near test spot A joined `g7_u4pruyd`: one join presence (`maxstanzas="0"`) plus one MAM query. One rectangle
+  (`stroke-accent fill-accent`) covered the cell and the "Test spot" badge showed.
+- A click in the cell to the east switched to `g7_u4pruye`: exactly one `unavailable` presence plus one join. A second
+  click inside the same cell sent zero stanzas.
+- Test spot C recentred the map on London (`g7_gcpvj0d`) with the cell rectangle fully in view.
+- Closing the panel unmounted the map (no `.leaflet-container` left); reopening remounted it with the rectangle. There was
+  no "Map container is already initialized" error under StrictMode.
+- Two users: bob (second tab) chose spot C and saw alice in `g7_gcpvj0d`, then clicked the neighbour on his map and
+  landed in `g7_gcpvj0e`. Alice saw "bob left" from a single unavailable presence.
+- Privacy: the captured WebSocket frames contained no `lat|lng|latitude|longitude|coord` and no `-?\d{1,3}\.\d{4,}` numbers.
+- 360×640 with the panel open: `scrollWidth` 360 (no horizontal overflow), map 309×192. The map scrolls under the sticky
+  header (z-10) because its wrapper has `isolation: isolate`.
+- Keyboard: with the map focused, ArrowLeft panned it, and Tab moved through the map's own controls and then out of
+  the map (no focus trap). A focused-map keydown of `-` (keyCode 189) zoomed from 16 to 15 and `+` (187) back to 16.
+  These were dispatched with real key codes, because the test harness sends `keyCode 0` for `-`/`+`; arrow keys used
+  real key presses.
+- 1280×800: panel closed `scrollHeight` 800/800; panel open 858/800, with the chat card squeezed to a sliver. This is
+  accepted for a dev-only panel, and a nested scroll container was rejected (AC9 amended: with the panel open the page
+  may scroll by the excess; with it closed it does not).
+- Dark mode (emulated `prefers-color-scheme: dark`): tiles stay light (no filter), the frame uses the dark `line` token
+  (rgb(51, 65, 85)) and the cell outline keeps the accent teal. Leaflet's own zoom buttons stay white (Leaflet default,
+  not overridden on purpose).
+- The "pane flips visibility every ~6 s" noise was not specifically observed this run. One background-tab socket drop
+  and reconnect happened, noted below.
+- Production build with `VITE_MAP_TILE_URL` set in the shell: still one JS and one CSS file. JS was 252 073 B (+940 vs the
+  d50b137 baseline) and CSS 16 171 B (+280). A grep for `leaflet|openstreetmap|tile\.|Loading map|Test location map|show a map here|Test locations|Test spot A`
+  found nothing, and neither did a case-sensitive `L\.map`. The plan's case-insensitive `L\.map` also matched a minified
+  `l.map(` array call, which is a false positive that is in the baseline too.
+- Seen but not caused by this slice:
+  - At a 1.25 device-pixel ratio, faint seams can show between tiles (Leaflet sub-pixel rendering). Tile `max-width` is
+    `none`, so the Tailwind preflight is not involved.
+  - When the background tab's socket dropped, the reconnect rejoined as `alice-2` until the old occupant timed out.
+    That is the existing reconnect and ghost-occupant behaviour (ADR-010).

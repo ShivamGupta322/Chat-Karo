@@ -4,6 +4,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { App } from '../../src/App';
 import { initialRoomState, useRoomStore } from '../../src/state/room';
 import { useSessionStore } from '../../src/state/session';
+import { AREA_TEXT } from '../../src/ui/text';
 import { XmppProvider, createXmppClient } from '../../src/xmpp';
 import {
   CELL_ROOM,
@@ -11,6 +12,7 @@ import {
   mamResult,
   parse,
   presence as presenceIn,
+  presenceError,
 } from '../fixtures/stanzas';
 import {
   createFakeGeolocation,
@@ -65,7 +67,7 @@ describe('chat flow', () => {
     const user = userEvent.setup({ delay: null });
     render(
       <XmppProvider client={client}>
-        <App xmppDomain="chaterl.localhost" mucDomain="muc.chaterl.localhost" />
+        <App xmppDomain="chaterl.localhost" mucDomain="muc.chaterl.localhost" mapTileUrl={null} />
       </XmppProvider>,
     );
 
@@ -134,7 +136,7 @@ describe('chat flow', () => {
     });
     render(
       <XmppProvider client={client}>
-        <App xmppDomain="chaterl.localhost" mucDomain="muc.chaterl.localhost" />
+        <App xmppDomain="chaterl.localhost" mucDomain="muc.chaterl.localhost" mapTileUrl={null} />
       </XmppProvider>,
     );
     return t;
@@ -370,6 +372,54 @@ describe('chat flow', () => {
       ).toBeInTheDocument();
       expect(joinsTo(t)).toEqual([]);
       expect(geo.watchCalls()).toBe(0);
+    }, 20_000);
+
+    it('a re-render with a new-but-equal area state sends no stanzas', async () => {
+      const t = mount();
+      const user = userEvent.setup({ delay: null });
+      await signInAndJoin(t, user);
+      const before = t.sent.length;
+      act(() => {
+        geo.emit(57.6492, 10.4075); // same cell u4pruyd: a new fix, an equal area
+      });
+      act(() => {
+        t.pushStanza(groupchat('bob', 'hi', '', 'm-rerender'));
+      });
+      expect(t.sent).toHaveLength(before);
+    }, 20_000);
+
+    it('"Join again" sits outside the status region, retries once and hands focus to the status line', async () => {
+      const t = mount();
+      const user = userEvent.setup({ delay: null });
+      await user.type(screen.getByLabelText('Password'), 'pw');
+      await user.click(screen.getByRole('button', { name: 'Sign in' }));
+      act(() => {
+        t.pushStatus({ kind: 'connected', jid: 'alice@chaterl.localhost/r1' });
+      });
+      await screen.findByRole('button', { name: 'Sign out' });
+      await locate();
+      act(() => {
+        t.pushStanza(presenceError('forbidden', CELL_ROOM));
+      });
+      const rejoin = screen.getByRole('button', { name: AREA_TEXT.rejoin });
+      for (const status of screen.getAllByRole('status')) {
+        expect(within(status).queryByRole('button')).toBeNull();
+      }
+      const joinsBefore = joinsTo(t).length;
+      await user.click(rejoin);
+      expect(joinsTo(t)).toHaveLength(joinsBefore + 1);
+      expect(screen.queryByRole('button', { name: AREA_TEXT.rejoin })).toBeNull();
+      expect(document.activeElement).toBe(screen.getByText(AREA_TEXT.joining('Area u4pruyd')));
+    }, 20_000);
+
+    it('after leaving the room the status line says so', async () => {
+      const t = mount();
+      const user = userEvent.setup({ delay: null });
+      await signInAndJoin(t, user);
+      act(() => {
+        t.pushStanza(presence('alice', ['110'], 'unavailable'));
+      });
+      expect(screen.getByText(AREA_TEXT.left)).toBeInTheDocument();
     }, 20_000);
 
     it('privacy: no coordinate or location field is ever put on the wire', async () => {

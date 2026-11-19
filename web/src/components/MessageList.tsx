@@ -185,7 +185,7 @@ export function MessageList({
         tabIndex={-1}
         className="m-0 grid list-none content-start gap-0.5 p-0"
       >
-        {rows.length === 0 && (
+        {rows.length === 0 && emptyText !== '' && (
           <li className="text-center text-sm text-ink-muted">{emptyText}</li>
         )}
         {rows.map((row) => {

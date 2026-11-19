@@ -152,7 +152,9 @@ web/src/
 │                mam.ts (MAM history query builder + result/fin parsers, pure)
 ├── geo/         geohash.ts (own encoder, no ngeohash), cell.ts (cellFor; roomJidForCell is TEMPORARY until Phase 3),
 │                useLocation.ts (watchPosition + Permissions API, cell-only state), useArea.ts (device cell + dev spot),
-│                DevLocationPicker.tsx (dev only), index.ts (the only public entry; coordinates never leave geo/;
+│                DevLocationPicker.tsx (dev only), DevMap.tsx (dev only, lazy, the only Leaflet importer; shades the whole
+│                cell, never the clicked point), DevMapBoundary.tsx (error boundary), decodeGeohashBounds/wrapLng in
+│                geohash.ts, index.ts (the only public entry; coordinates never leave geo/;
 │                hysteresis arrives in Phase 4)
 ├── api/         geoService.ts (typed fetch wrapper)
 ├── state/       Zustand stores: session, room, messages, presence; useAreaRoom.ts (keeps the client in the one desired room)

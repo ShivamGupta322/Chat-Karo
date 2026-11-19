@@ -58,7 +58,7 @@ describe('Chat page room status', () => {
     const client = createXmppClient(createFakeTransport(), { mucDomain: 'muc.chaterl.localhost' });
     render(
       <XmppProvider client={client}>
-        <Chat mucDomain="muc.chaterl.localhost" />
+        <Chat mucDomain="muc.chaterl.localhost" mapTileUrl={null} />
       </XmppProvider>,
     );
     await act(async () => {

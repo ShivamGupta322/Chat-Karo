@@ -26,9 +26,9 @@ Learned in Phase 1 (carry into Phase 2):
       backoff, keepalive, liveness probe; 2b-2a done: room history from MAM; 2b-2b done: "Load earlier messages")
 - [x] Chat page: MessageList, Composer, OccupantList (slice 2a)
 - [x] Branding & UI polish: product name "Nearby", design tokens, dark mode, chat bubbles, plain-language UI (slice 2a+, ADR-009)
-- [ ] `geo/useLocation` with permission/error states; dev-mode map location picker
+- [x] `geo/useLocation` with permission/error states; dev-mode map location picker
       (2c-1 done: location states, own geohash encoder, keyboard dev picker, temporary client-side area room, ADR-013;
-      **2c-2: Leaflet map picker** still to do)
+      2c-2 done: dev-only Leaflet map picker, ADR-014, verified live 2026-11-19)
 - [x] **Demo:** client-side geohash → join room → chat (temporary, before geo_service). Verified live 2026-11-19 (ADR-013).
 
 Carry-forward for the next slices (from the 2a/2a+ reviews):

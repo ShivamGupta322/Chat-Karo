@@ -16,6 +16,11 @@ const GEO_ANY = {
   group: ['**/geo', '**/geo/*'],
   message: 'src/xmpp/ must not depend on geo/: the transport layer never sees a location.',
 };
+const LEAFLET = {
+  group: ['leaflet', 'leaflet/*', 'react-leaflet', 'react-leaflet/*', '@react-leaflet/*'],
+  message:
+    'Only src/geo/DevMap.tsx may import Leaflet: it is lazy-loaded in dev only and must never reach a production bundle.',
+};
 const restrict = (...patterns) => ['error', { patterns }];
 
 export default tseslint.config(
@@ -34,27 +39,32 @@ export default tseslint.config(
       '@typescript-eslint/no-explicit-any': 'error',
       'no-console': ['error', { allow: ['warn', 'error'] }],
       // Everywhere: strophe stays in src/xmpp/strophe, and only the geo index is importable.
-      'no-restricted-imports': restrict(STROPHE, GEO_DEEP),
+      'no-restricted-imports': restrict(STROPHE, GEO_DEEP, LEAFLET),
     },
   },
   {
     // The transport layer never imports geo at all.
     files: ['src/xmpp/**'],
-    rules: { 'no-restricted-imports': restrict(STROPHE, GEO_ANY) },
+    rules: { 'no-restricted-imports': restrict(STROPHE, GEO_ANY, LEAFLET) },
   },
   {
     // geo may import its own modules directly; it must stay silent (no console at all) so nothing can log a position.
     files: ['src/geo/**'],
     rules: {
-      'no-restricted-imports': restrict(STROPHE),
+      'no-restricted-imports': restrict(STROPHE, LEAFLET),
       // A bare severity would inherit the base allow list (warn, error), so pass explicit empty options.
       'no-console': ['error', {}],
     },
   },
   {
+    // The one file allowed to import Leaflet (no-console stays inherited from the geo block).
+    files: ['src/geo/DevMap.tsx'],
+    rules: { 'no-restricted-imports': restrict(STROPHE) },
+  },
+  {
     // The strophe adapter may import strophe.js, but still not geo.
     files: ['src/xmpp/strophe/**'],
-    rules: { 'no-restricted-imports': restrict(GEO_ANY) },
+    rules: { 'no-restricted-imports': restrict(GEO_ANY, LEAFLET) },
   },
   {
     // Tests may reach into geo/ internals; only the strophe wire tests may import strophe.js.

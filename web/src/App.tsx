@@ -7,13 +7,14 @@ import { useXmppClient } from './xmpp';
 export interface AppProps {
   xmppDomain: string;
   mucDomain: string;
+  mapTileUrl: string | null;
 }
 
-export function App({ xmppDomain, mucDomain }: AppProps): React.JSX.Element {
+export function App({ xmppDomain, mucDomain, mapTileUrl }: AppProps): React.JSX.Element {
   useXmppStoreBinding(useXmppClient());
   // 'reconnecting' keeps the chat on screen: a dropped connection must not bounce the user to login.
   const inSession = useSessionStore(
     (s) => s.connection.status === 'connected' || s.connection.status === 'reconnecting',
   );
-  return inSession ? <Chat mucDomain={mucDomain} /> : <DevLogin xmppDomain={xmppDomain} />;
+  return inSession ? <Chat mucDomain={mucDomain} mapTileUrl={mapTileUrl} /> : <DevLogin xmppDomain={xmppDomain} />;
 }

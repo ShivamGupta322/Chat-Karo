@@ -66,6 +66,11 @@ npm run dev      # http://localhost:5173
 Sign in as `alice` with `DEV_USER_PASSWORD` from your own `.env`. Nearby puts you in the chat for the area you are in.
 The browser asks for permission to use your location; the chat room is named after your area code (for example
 `Area u4pruyd`). Your exact location is turned into that code inside the browser and is never sent or stored.
+Optional, dev only: set `VITE_MAP_TILE_URL` in `.env` (the line in `.env.example` uses OpenStreetMap tiles; copy it if
+your `.env` predates this) to get a map in the "Test locations (dev)" panel. Leave it empty for no map; the test spots
+and fields still work. The map is never part of a production build. Each tile request tells the tile server which area
+you are viewing, plus your IP, and OpenStreetMap's tile policy asks for light interactive use with the attribution kept
+visible (see `.env.example`).
 Location needs a secure page: `localhost` works, but a LAN IP over plain http (for example from a phone) is
 treated as insecure and shows a message instead.
 
@@ -78,7 +83,7 @@ Room assignment is client-side and temporary here (ADR-013); the server takes ov
 2. `bash infra/mongooseim/dev-seed.sh` to create the `alice` and `bob` test users.
 3. `cd web && npm ci && npm run dev`, then open http://localhost:5173.
 4. Open a second window (a private one) so you have two sessions. Sign in as `alice` in one and `bob` in the other.
-5. In each window open "Test locations (dev)" and choose "Test spot A". Both are now in `Area u4pruyd`; send messages
+5. In each window open "Test locations (dev)" and choose "Test spot A" (or click the map, if you set `VITE_MAP_TILE_URL`). Both are now in `Area u4pruyd`; send messages
    both ways. (Or allow your real location in both windows.)
 6. In `bob`'s window choose "Test spot B (next to A)". Bob leaves the first room (alice sees "bob left") and lands
    in an empty chat for `Area u4pruye`, with its own history.

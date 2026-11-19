@@ -3,6 +3,8 @@ export interface AppConfig {
   xmppWsUrl: string;
   xmppDomain: string;
   mucDomain: string;
+  /** Dev-only map tile URL template, or null when unset. */
+  mapTileUrl: string | null;
 }
 export type ConfigResult = { ok: true; config: AppConfig } | { ok: false; errors: string[] };
 
@@ -14,6 +16,25 @@ function str(v: string | boolean | undefined): string {
 
 function validDomain(d: string): boolean {
   return d.length > 0 && !/[@/\s]/.test(d);
+}
+
+const MAP_TILE_ERROR = 'VITE_MAP_TILE_URL must be an http(s) URL template with {z}, {x} and {y}';
+
+/** An http(s) template with {z}, {x}, {y} and optionally {s}/{r}; nothing else in braces; no credentials. */
+function validTileTemplate(t: string): boolean {
+  if (!t.includes('{z}') || !t.includes('{x}') || !t.includes('{y}')) return false;
+  if (/[{}]/.test(t.replace(/{[sxyzr]}/g, ''))) return false;
+  try {
+    const u = new URL(t.replace(/{s}/g, 'a').replace(/{[zxy]}/g, '0').replace(/{r}/g, ''),);
+    return (
+      (u.protocol === 'http:' || u.protocol === 'https:') &&
+      u.hostname !== '' &&
+      u.username === '' &&
+      u.password === ''
+    );
+  } catch {
+    return false;
+  }
 }
 
 export function parseConfig(env: Env): ConfigResult {
@@ -41,6 +62,17 @@ export function parseConfig(env: Env): ConfigResult {
   const muc = mucRaw !== '' ? mucRaw : `muc.${domain}`;
   if (mucRaw !== '' && !validDomain(mucRaw)) errors.push('VITE_XMPP_MUC_DOMAIN is invalid');
 
+  const tiles = str(env.VITE_MAP_TILE_URL);
+  if (tiles !== '' && !validTileTemplate(tiles)) errors.push(MAP_TILE_ERROR);
+
   if (errors.length > 0) return { ok: false, errors };
-  return { ok: true, config: { xmppWsUrl: ws, xmppDomain: domain, mucDomain: muc } };
+  return {
+    ok: true,
+    config: {
+      xmppWsUrl: ws,
+      xmppDomain: domain,
+      mucDomain: muc,
+      mapTileUrl: tiles === '' ? null : tiles,
+    },
+  };
 }

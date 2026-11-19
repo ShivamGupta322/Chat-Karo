@@ -1,4 +1,4 @@
-import { useMemo } from "react";
+import { useLayoutEffect, useRef } from "react";
 import { AppHeader } from "../components/AppHeader";
 import { AreaPanel } from "../components/AreaPanel";
 import { ConnectionBanner } from "../components/ConnectionBanner";
@@ -18,7 +18,13 @@ import {
 } from "../ui/text";
 import { localpartOf, useXmppClient } from "../xmpp";
 
-export function Chat({ mucDomain }: { mucDomain: string }): React.JSX.Element {
+export function Chat({
+  mucDomain,
+  mapTileUrl,
+}: {
+  mucDomain: string;
+  mapTileUrl: string | null;
+}): React.JSX.Element {
   const client = useXmppClient();
   const connection = useSessionStore((s) => s.connection);
   const room = useRoomStore();
@@ -27,10 +33,8 @@ export function Chat({ mucDomain }: { mucDomain: string }): React.JSX.Element {
 
   // TEMPORARY (Phase 3): the client picks the room from the cell; geo_service /api/locate will replace this.
   const cell = area.state.status === "located" ? area.state.cell : null;
-  const desiredRoomJid = useMemo(
-    () => (cell === null ? null : roomJidForCell(cell, mucDomain)),
-    [cell, mucDomain],
-  );
+  // A string: useAreaRoom's effect deps compare it by value, so it is stable per cell.
+  const desiredRoomJid = cell === null ? null : roomJidForCell(cell, mucDomain);
   const { retry } = useAreaRoom(client, desiredRoomJid, localpartOf(jid));
 
   // Never show another room's data: until the store has switched to the desired room, show nothing of it.
@@ -55,10 +59,23 @@ export function Chat({ mucDomain }: { mucDomain: string }): React.JSX.Element {
       );
     } else if (room.status === "failed" && room.failure) {
       statusLine = describeJoinFailure(room.failure.reason);
-    } else if (room.status === "left") statusLine = "You left the room";
+    } else if (room.status === "left") statusLine = AREA_TEXT.left;
     else if (room.status === "reconnecting")
       statusLine = CONNECTION_TEXT.roomReconnecting;
   }
+
+  const showRejoin = current && (room.status === "failed" || room.status === "left");
+  const statusRef = useRef<HTMLParagraphElement>(null);
+  const rejoinFocused = useRef(false);
+  const hadRejoin = useRef(false);
+  // When "Join again" goes away while it has focus (retry -> joining), keep keyboard users on the status line.
+  useLayoutEffect(() => {
+    if (hadRejoin.current && !showRejoin && rejoinFocused.current) {
+      statusRef.current?.focus({ preventScroll: true });
+      rejoinFocused.current = false;
+    }
+    hadRejoin.current = showRejoin;
+  }, [showRejoin]);
 
   const emptyText = joined
     ? room.history.loading
@@ -96,23 +113,34 @@ export function Chat({ mucDomain }: { mucDomain: string }): React.JSX.Element {
             onSwitchArea={area.commitMove}
             devHint={import.meta.env.DEV}
           />
-          {import.meta.env.DEV && <DevLocationPicker override={area.dev} />}
+          {import.meta.env.DEV && <DevLocationPicker override={area.dev} mapTileUrl={mapTileUrl} />}
 
-          <p role="status" className="m-0 text-sm text-ink-muted">
-            {statusLine}
-            {current && (room.status === "failed" || room.status === "left") && (
-              <>
-                {" "}
-                <button
-                  type="button"
-                  onClick={retry}
-                  className="rounded-lg border border-field bg-surface px-3 py-1 text-sm font-medium text-ink hover:bg-surface-sunken"
-                >
-                  {AREA_TEXT.rejoin}
-                </button>
-              </>
+          <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
+            <p
+              ref={statusRef}
+              tabIndex={-1}
+              role="status"
+              className="m-0 text-sm text-ink-muted"
+            >
+              {statusLine}
+            </p>
+            {showRejoin && (
+              <button
+                type="button"
+                onClick={retry}
+                onFocus={() => {
+                  rejoinFocused.current = true;
+                }}
+                onBlur={(e) => {
+                  // A blur caused by the button being removed must not forget that it had focus.
+                  if (e.currentTarget.isConnected) rejoinFocused.current = false;
+                }}
+                className="rounded-lg border border-field bg-surface px-3 py-1 text-sm font-medium text-ink hover:bg-surface-sunken"
+              >
+                {AREA_TEXT.rejoin}
+              </button>
             )}
-          </p>
+          </div>
 
           <section
             aria-label="Chat"

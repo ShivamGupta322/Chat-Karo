@@ -9,7 +9,7 @@ import {
   type AddressError,
   type SendError,
 } from '../../src/ui/text';
-import { DEV_LOCATION_TEXT } from '../../src/geo/devLocationText';
+import { DEV_LOCATION_TEXT, DEV_MAP_TEXT } from '../../src/geo/devLocationText';
 import type { ConnectionError, JoinFailure } from '../../src/xmpp';
 
 const JOIN_FAILURES: JoinFailure[] = [
@@ -118,6 +118,17 @@ describe('area and dev-location text', () => {
   it.each(strings(DEV_LOCATION_TEXT))('DEV_LOCATION_TEXT %s has no jargon', (text) => {
     expect(text).not.toMatch(JARGON);
     expect(text.length).toBeGreaterThan(0);
+  });
+
+  it.each(
+    strings({ label: DEV_MAP_TEXT.label, hint: DEV_MAP_TEXT.hint, loading: DEV_MAP_TEXT.loading, failed: DEV_MAP_TEXT.failed }),
+  )('DEV_MAP_TEXT %s has no jargon', (text) => {
+    expect(text).not.toMatch(/geohash|jid|muc|cell|coordinate/i);
+    expect(text.length).toBeGreaterThan(0);
+  });
+
+  it('has the left-room line', () => {
+    expect(AREA_TEXT.left).toBe('You left the room');
   });
 
   it('formats the area label and joining message', () => {

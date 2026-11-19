@@ -11,6 +11,8 @@ export interface GeoPoint {
 
 export interface DevOverride {
   readonly active: boolean;
+  /** The dev cell (no coordinates), or null. */
+  readonly cell: Cell | null;
   /** Validates via cellFor and stores ONLY the resulting Cell. The point is not retained. */
   set(point: GeoPoint): { ok: true } | { ok: false; error: GeohashError };
   clear(): void;
@@ -64,10 +66,9 @@ export function useArea(): AreaController {
     if (latest !== null) setCommitted(latest);
   }, [latest]);
 
-  const devActive = devCell !== null;
   const dev = useMemo<DevOverride>(
-    () => ({ active: devActive, set: setDev, clear: clearDev }),
-    [devActive, setDev, clearDev],
+    () => ({ active: devCell !== null, cell: devCell, set: setDev, clear: clearDev }),
+    [devCell, setDev, clearDev],
   );
 
   const devGeohash = devCell === null ? null : devCell.geohash;
