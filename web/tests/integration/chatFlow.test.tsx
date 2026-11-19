@@ -81,11 +81,14 @@ describe('chat flow', () => {
     // Full UI flow; jsdom + userEvent can exceed the 5 s default on slower machines.
   }, 20_000);
 
-  function mount(): ReturnType<typeof createFakeTransport> {
+  function mount(
+    extra: Partial<Parameters<typeof createXmppClient>[1]> = {},
+  ): ReturnType<typeof createFakeTransport> {
     const t = createFakeTransport();
     const client = createXmppClient(t, {
       mucDomain: 'muc.chaterl.localhost',
       random: () => 0.5,
+      ...extra,
     });
     render(
       <XmppProvider client={client}>
@@ -299,5 +302,116 @@ describe('chat flow', () => {
       expect(within(log).getAllByText('before the outage')).toHaveLength(1);
       expect(within(log).getAllByText('while you were away')).toHaveLength(1);
     }, 20_000);
+
+    describe('load earlier messages', () => {
+      const rsmFin = (complete: boolean, first: string, last: string): Element =>
+        parse(
+          `<iq type="result"><fin xmlns="urn:xmpp:mam:2" complete="${String(complete)}"><set xmlns="http://jabber.org/protocol/rsm"><first index="0">${first}</first><last>${last}</last></set></fin></iq>`,
+        );
+      const answerRsm = async (
+        t: ReturnType<typeof createFakeTransport>,
+        i: number,
+        complete: boolean,
+        first: string,
+        last: string,
+      ): Promise<void> => {
+        await act(async () => {
+          t.resolveIq(i, { ok: true, stanza: rsmFin(complete, first, last) });
+          await Promise.resolve();
+        });
+      };
+      const BUTTON = { name: 'Load earlier messages' };
+
+      async function reachIncompleteHistory(): Promise<{
+        t: ReturnType<typeof createFakeTransport>;
+        user: ReturnType<typeof userEvent.setup>;
+      }> {
+        const t = mount({ mamPageSize: 2 });
+        const user = userEvent.setup({ delay: null });
+        await signInAndJoin(t, user);
+        expect(screen.queryByRole('button', BUTTON)).toBeNull();
+        pushResult(t, 0, 'H3', 'bob', 'body H3');
+        pushResult(t, 0, 'H4', 'bob', 'body H4');
+        await answerRsm(t, 0, false, 'H3', 'H4');
+        return { t, user };
+      }
+
+      it('pages back above what is shown, keeps one divider, then withdraws the button', async () => {
+        const { t, user } = await reachIncompleteHistory();
+        const button = screen.getByRole('button', BUTTON);
+        expect(within(screen.getByRole('log')).queryByRole('button')).toBeNull();
+        await user.click(button);
+        // The shared throttle may hold the query back for up to 1.1 s.
+        await vi.waitFor(
+          () => {
+            expect(t.iqs).toHaveLength(2);
+          },
+          { timeout: 3_000 },
+        );
+        const iq = t.iqs[1];
+        expect(iq?.querySelector('before')?.textContent).toBe('H3');
+        expect(iq?.querySelector('after')).toBeNull();
+        expect(screen.getByRole('button', { name: 'Loading earlier messages…' })).toHaveAttribute(
+          'aria-disabled',
+          'true',
+        );
+
+        pushResult(t, 1, 'H1', 'carol', 'body H1');
+        pushResult(t, 1, 'H2', 'carol', 'body H2');
+        await answerRsm(t, 1, true, 'H1', 'H2');
+
+        const log = screen.getByRole('log');
+        const bubbles = within(log)
+          .getAllByText(/^body H\d$/)
+          .map((el) => el.textContent);
+        expect(bubbles).toEqual(['body H1', 'body H2', 'body H3', 'body H4']);
+        expect(screen.queryByRole('button', BUTTON)).toBeNull();
+        expect(screen.queryByRole('button', { name: 'Loading earlier messages…' })).toBeNull();
+        const separators = within(log).getAllByRole('separator');
+        expect(separators).toHaveLength(1);
+        expect(separators[0]?.previousElementSibling).toHaveTextContent('body H4');
+        expect(log).toHaveFocus();
+
+        act(() => {
+          t.pushStanza(
+            groupchat(
+              'carol',
+              'body H2',
+              `<stanza-id xmlns="urn:xmpp:sid:0" id="H2" by="${ROOM}"/>`,
+              'live-copy',
+            ),
+          );
+        });
+        expect(within(log).getAllByText('body H2')).toHaveLength(1);
+      }, 20_000);
+
+      it('shows its own error and "Try again", never the recent-messages banner, and retries the same page', async () => {
+        const { t, user } = await reachIncompleteHistory();
+        await user.click(screen.getByRole('button', BUTTON));
+        await vi.waitFor(
+          () => {
+            expect(t.iqs).toHaveLength(2);
+          },
+          { timeout: 3_000 },
+        );
+        await act(async () => {
+          t.resolveIq(1, { ok: false, condition: 'resource-constraint' });
+          await Promise.resolve();
+        });
+        expect(screen.getByText("Couldn't load earlier messages.")).toBeInTheDocument();
+        expect(screen.queryByText("Couldn't load recent messages.")).toBeNull();
+        const retry = screen.getByRole('button', { name: 'Try again' });
+        expect(retry).toHaveAccessibleDescription("Couldn't load earlier messages.");
+        await user.click(retry);
+        await vi.waitFor(
+          () => {
+            expect(t.iqs).toHaveLength(3);
+          },
+          { timeout: 3_000 },
+        );
+        expect(t.iqs[2]?.querySelector('before')?.textContent).toBe('H3');
+        expect(screen.queryByText("Couldn't load recent messages.")).toBeNull();
+      }, 20_000);
+    });
   });
 });

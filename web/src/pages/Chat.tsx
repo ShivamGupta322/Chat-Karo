@@ -86,6 +86,19 @@ export function Chat({ mucDomain }: { mucDomain: string }): React.JSX.Element {
             <MessageList
               items={room.timeline}
               busy={room.history.loading}
+              earlier={
+                joined &&
+                room.history.canLoadEarlier &&
+                !room.history.loading &&
+                !room.history.failed
+                  ? {
+                      status: room.history.earlier,
+                      onLoad: () => {
+                        if (room.roomJid !== null) client.loadEarlier(room.roomJid);
+                      },
+                    }
+                  : null
+              }
               emptyText={
                 joined
                   ? room.history.loading

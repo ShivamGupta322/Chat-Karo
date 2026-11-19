@@ -48,8 +48,8 @@ export type JoinFailure =
 
 export type LeaveReason = 'self' | 'kicked' | 'banned' | 'disconnected' | 'other';
 
-/** initial: newest page after a first join; gap: catching up after a reconnect. */
-export type HistoryDirection = 'initial' | 'gap';
+/** initial: newest page after a first join; gap: catching up after a reconnect; earlier: "Load earlier messages". */
+export type HistoryDirection = 'initial' | 'gap' | 'earlier';
 
 export type XmppEvent =
   | { type: 'connection'; state: ConnectionState }
@@ -66,9 +66,19 @@ export type XmppEvent =
   | {
       type: 'history-loaded';
       roomJid: string;
-      direction: HistoryDirection;
+      direction: 'initial' | 'gap';
       messages: ChatMessage[];
       done: boolean;
+      complete: boolean;
+    }
+  | {
+      type: 'history-loaded';
+      roomJid: string;
+      direction: 'earlier';
+      /** the <before> id this page ends at; the store inserts the page just above it */
+      anchorId: string;
+      messages: ChatMessage[];
+      done: true;
       complete: boolean;
     }
   | { type: 'history-failed'; roomJid: string; direction: HistoryDirection; condition: string };
@@ -86,6 +96,9 @@ export interface XmppClient {
   sendGroupchat(roomJid: string, body: string): SendResult;
   /** Re-run history for a joined room after history-failed. No-op if not connected/joined or a query is queued/in flight. */
   retryHistory(roomJid: string): void;
+  /** Fetch the page before the oldest loaded history message (24 h window). No-op unless connected, joined,
+   *  the initial load has completed, more history exists, and no history query is queued or in flight. */
+  loadEarlier(roomJid: string): void;
   subscribe(listener: (e: XmppEvent) => void): () => void;
   /** online / tab visible / "Try now": retry now if reconnecting, liveness-probe if connected, else no-op. */
   wake(trigger: WakeTrigger): void;

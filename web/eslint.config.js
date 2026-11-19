@@ -32,7 +32,7 @@ export default tseslint.config(
     },
   },
   {
-    files: ['src/xmpp/strophe/**'],
+    files: ['src/xmpp/strophe/**', 'tests/xmpp/strophe/**'],
     rules: { 'no-restricted-imports': 'off' },
   },
   {

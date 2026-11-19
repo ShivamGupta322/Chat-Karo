@@ -48,23 +48,47 @@ describe('buildMamQuery', () => {
     expect(fields[1]?.textContent).toBe(base.startIso);
   });
 
+  /** MongooseIM ignores RSM children that carry any attribute (incl. xmlns), so they must be bare. */
+  function expectBareRsm(iq: Element, names: string[]): Element {
+    const set = iq.querySelector('set') as Element;
+    expect(set.namespaceURI).toBe(NS_RSM);
+    expect(Array.from(set.children).map((c) => c.localName)).toEqual(names);
+    for (const c of Array.from(set.children)) {
+      expect(c.getAttribute('xmlns')).toBeNull();
+      expect(c.attributes.length).toBe(0);
+    }
+    return set;
+  }
+
   it('asks for the last page with an empty <before/>', () => {
     const iq = buildMamQuery({ ...base, page: { before: true } });
-    const set = iq.querySelector('set');
-    expect(set?.namespaceURI).toBe(NS_RSM);
-    expect(set?.querySelector('max')?.textContent).toBe('50');
-    const before = set?.querySelector('before');
-    expect(before?.namespaceURI).toBe(NS_RSM);
-    expect(before?.textContent).toBe('');
-    expect(set?.querySelector('after')).toBeNull();
+    const set = expectBareRsm(iq, ['max', 'before']);
+    expect(set.querySelector('max')?.textContent).toBe('50');
+    expect(set.querySelector('before')?.textContent).toBe('');
   });
 
   it('pages forward with <after>ID</after> and no <before/>', () => {
     const iq = buildMamQuery({ ...base, page: { after: 'S1' } });
-    const set = iq.querySelector('set');
-    expect(set?.querySelector('after')?.textContent).toBe('S1');
-    expect(set?.querySelector('after')?.namespaceURI).toBe(NS_RSM);
-    expect(set?.querySelector('before')).toBeNull();
+    const set = expectBareRsm(iq, ['max', 'after']);
+    expect(set.querySelector('max')?.textContent).toBe('50');
+    expect(set.querySelector('after')?.textContent).toBe('S1');
+  });
+
+  it('pages backwards with <before>ID</before> and no <after>', () => {
+    const iq = buildMamQuery({ ...base, page: { before: 'CO4G5LO56CG1' } });
+    const set = expectBareRsm(iq, ['max', 'before']);
+    expect(set.querySelector('max')?.textContent).toBe('50');
+    expect(set.querySelector('before')?.textContent).toBe('CO4G5LO56CG1');
+  });
+
+  it('escapes special characters in <before> so they round-trip', () => {
+    const nasty = `<&'"`;
+    const iq = buildMamQuery({ ...base, page: { before: nasty } });
+    expect(iq.querySelector('before')?.textContent).toBe(nasty);
+    // Built as a DOM text node, so the serializer escapes it and it never becomes markup.
+    const before = iq.querySelector('before');
+    expect(before?.children).toHaveLength(0);
+    expect(new XMLSerializer().serializeToString(before as Element)).toContain('&lt;&amp;');
   });
 
   it('escapes special characters so they round-trip', () => {

@@ -5,7 +5,13 @@ import { describe, expect, it, vi } from 'vitest';
 import { HistoryStatus } from '../../src/components/HistoryStatus';
 import type { RoomHistory } from '../../src/state/room';
 
-const idle: RoomHistory = { loading: false, failed: false, canLoadEarlier: false, insertAt: 0 };
+const idle: RoomHistory = {
+  loading: false,
+  failed: false,
+  canLoadEarlier: false,
+  insertAt: 0,
+  earlier: 'idle',
+};
 
 describe('HistoryStatus', () => {
   it('renders nothing when idle', () => {

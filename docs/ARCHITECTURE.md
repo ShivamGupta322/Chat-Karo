@@ -153,7 +153,8 @@ web/src/
 ├── geo/         useLocation.ts (watchPosition + hysteresis), geohash helpers (ngeohash)
 ├── api/         geoService.ts (typed fetch wrapper)
 ├── state/       Zustand stores: session, room, messages, presence
-├── components/  MessageList, Composer, OccupantList, RangeSlider, RoomMap, ReportDialog
+├── components/  MessageList (+ scrollAnchor.ts: keeps scroll position when earlier messages load above),
+│                Composer, OccupantList, RangeSlider, RoomMap, ReportDialog
 └── pages/       Onboarding, Chat, Map
 ```
 

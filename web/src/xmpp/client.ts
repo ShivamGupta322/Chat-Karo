@@ -1,7 +1,13 @@
-import { domainOf, isValidRoomJid, normalizeNick } from './jid';
-import { DEFAULT_BACKOFF, createRetryScheduler } from './reconnect';
-import { buildMamQuery, isMamResultMessage, parseMamFin, parseMamResult, type MamItem } from './mam';
-import { acceptInstantRoom } from './roomCreation';
+import { domainOf, isValidRoomJid, normalizeNick } from "./jid";
+import { DEFAULT_BACKOFF, createRetryScheduler } from "./reconnect";
+import {
+  buildMamQuery,
+  isMamResultMessage,
+  parseMamFin,
+  parseMamResult,
+  type MamItem,
+} from "./mam";
+import { acceptInstantRoom } from "./roomCreation";
 import {
   buildGroupchat,
   buildIqErrorReply,
@@ -15,8 +21,8 @@ import {
   parseGroupchat,
   parseMucPresence,
   type MucPresence,
-} from './stanzas';
-import type { TransportStatus, XmppTransport } from './transport';
+} from "./stanzas";
+import type { TransportStatus, XmppTransport } from "./transport";
 import {
   MAX_MESSAGE_LENGTH,
   type ConnectionError,
@@ -29,11 +35,16 @@ import {
   type XmppClient,
   type XmppClientOptions,
   type XmppEvent,
-} from './types';
+} from "./types";
+
+type Cursor =
+  | { direction: "initial" }
+  | { direction: "gap"; after: string }
+  | { direction: "earlier"; before: string };
 
 interface TrackedRoom {
   roomJid: string;
-  state: 'joining' | 'joined' | 'suspended';
+  state: "joining" | "joined" | "suspended";
   baseNick: string;
   nick: string;
   attempt: number;
@@ -46,6 +57,14 @@ interface TrackedRoom {
   initialDone: boolean;
   /** A live message with a stanza-id arrived since the current history run started. */
   liveSinceHistory: boolean;
+  /**
+   * The <before> cursor for "Load earlier": the oldest loaded history id. Set by an initial load only
+   * while null; replaced by each earlier page; null once nothing earlier exists (complete or
+   * item-not-found). Survives suspend/rejoin like lastSeenId. Never touched by gap pages or live
+   * messages: after a gap item-not-found fallback the new initial page sits below the pre-drop
+   * messages, so adopting its id would insert older pages out of order.
+   */
+  firstId: string | null;
   /** The history query queued or in flight, with the result messages buffered so far. */
   mam: {
     queryId: string;
@@ -58,23 +77,31 @@ interface TrackedRoom {
 }
 
 const KNOWN_FAILURES: ReadonlySet<string> = new Set<JoinFailure>([
-  'conflict',
-  'not-authorized',
-  'forbidden',
-  'registration-required',
-  'service-unavailable',
-  'not-acceptable',
-  'item-not-found',
+  "conflict",
+  "not-authorized",
+  "forbidden",
+  "registration-required",
+  "service-unavailable",
+  "not-acceptable",
+  "item-not-found",
 ]);
 
 function sameState(a: ConnectionState, b: ConnectionState): boolean {
   if (a.status !== b.status) return false;
-  if (a.status === 'connected' && b.status === 'connected') return a.jid === b.jid;
-  if (a.status === 'reconnecting' && b.status === 'reconnecting') {
-    return a.jid === b.jid && a.attempt === b.attempt && a.nextAttemptAt === b.nextAttemptAt;
+  if (a.status === "connected" && b.status === "connected")
+    return a.jid === b.jid;
+  if (a.status === "reconnecting" && b.status === "reconnecting") {
+    return (
+      a.jid === b.jid &&
+      a.attempt === b.attempt &&
+      a.nextAttemptAt === b.nextAttemptAt
+    );
   }
-  if (a.status === 'disconnected' && b.status === 'disconnected') {
-    return a.error?.reason === b.error?.reason && a.error?.condition === b.error?.condition;
+  if (a.status === "disconnected" && b.status === "disconnected") {
+    return (
+      a.error?.reason === b.error?.reason &&
+      a.error?.condition === b.error?.condition
+    );
   }
   return true;
 }
@@ -103,7 +130,7 @@ export function createXmppClient(
     now,
   });
 
-  let state: ConnectionState = { status: 'idle' };
+  let state: ConnectionState = { status: "idle" };
   let generation = 0;
   // Set only by our own disconnect(); the transport's own 'disconnecting' status must not set it.
   let userInitiated = false;
@@ -111,7 +138,7 @@ export function createXmppClient(
   let creds: { jid: string; password: string } | null = null;
   // True after the first successful sign-in of this connect(); only then are drops retried.
   let hadSession = false;
-  let lastJid = '';
+  let lastJid = "";
   let stableTimer: ReturnType<typeof setTimeout> | null = null;
   // Identity token of the liveness probe in flight, if any.
   let probe: object | null = null;
@@ -127,7 +154,10 @@ export function createXmppClient(
       try {
         l(event);
       } catch (err) {
-        console.error('xmpp listener error', err instanceof Error ? err.name : 'unknown');
+        console.error(
+          "xmpp listener error",
+          err instanceof Error ? err.name : "unknown",
+        );
       }
     }
   }
@@ -135,7 +165,7 @@ export function createXmppClient(
   function setState(next: ConnectionState): void {
     if (sameState(state, next)) return;
     state = next;
-    emit({ type: 'connection', state });
+    emit({ type: "connection", state });
   }
 
   function clearTimer(room: TrackedRoom): void {
@@ -168,38 +198,42 @@ export function createXmppClient(
     clearTimer(room);
     room.timer = setTimeout(() => {
       room.timer = null;
-      if (rooms.get(room.roomJid) !== room || room.state !== 'joining') return;
+      if (rooms.get(room.roomJid) !== room || room.state !== "joining") return;
       transport.send(buildLeavePresence(room.roomJid, room.nick));
       untrack(room);
-      emit({ type: 'room-join-failed', roomJid: room.roomJid, reason: 'timeout' });
+      emit({
+        type: "room-join-failed",
+        roomJid: room.roomJid,
+        reason: "timeout",
+      });
     }, joinTimeoutMs);
   }
 
   function sendJoin(room: TrackedRoom): void {
     transport.send(buildJoinPresence(room.roomJid, room.nick, 0));
-    emit({ type: 'room-joining', roomJid: room.roomJid, nick: room.nick });
+    emit({ type: "room-joining", roomJid: room.roomJid, nick: room.nick });
     startJoinTimer(room);
   }
 
   function suspendRooms(): void {
     for (const room of rooms.values()) {
-      if (room.state === 'suspended') continue;
+      if (room.state === "suspended") continue;
       clearTimer(room);
       cancelHistory(room);
-      room.state = 'suspended';
-      emit({ type: 'room-suspended', roomJid: room.roomJid });
+      room.state = "suspended";
+      emit({ type: "room-suspended", roomJid: room.roomJid });
     }
   }
 
   function rejoinRooms(): void {
     for (const room of [...rooms.values()]) {
-      if (room.state !== 'suspended') continue;
+      if (room.state !== "suspended") continue;
       // The server may still hold the old nick (or its -N variant); always start from the base nick.
       room.nick = room.baseNick;
       room.attempt = 0;
       room.configuring = false;
       room.occupants = new Set();
-      room.state = 'joining';
+      room.state = "joining";
       sendJoin(room);
     }
   }
@@ -213,21 +247,32 @@ export function createXmppClient(
     creds = null;
     hadSession = false;
     // Strophe reports failed and then disconnected; the first one wins so the error survives.
-    if (state.status === 'disconnected' || state.status === 'idle') return;
+    if (state.status === "disconnected" || state.status === "idle") return;
     for (const room of [...rooms.values()]) {
       clearTimer(room);
       cancelHistory(room);
-      emit({ type: 'room-left', roomJid: room.roomJid, reason: 'disconnected' });
+      emit({
+        type: "room-left",
+        roomJid: room.roomJid,
+        reason: "disconnected",
+      });
     }
     rooms.clear();
-    setState(error ? { status: 'disconnected', error } : { status: 'disconnected' });
+    setState(
+      error ? { status: "disconnected", error } : { status: "disconnected" },
+    );
   }
 
   function attemptNow(): void {
-    if (!creds || state.status !== 'reconnecting') return;
+    if (!creds || state.status !== "reconnecting") return;
     const myGeneration = ++generation;
     lastAttemptAt = now();
-    setState({ status: 'reconnecting', jid: state.jid, attempt: state.attempt, nextAttemptAt: null });
+    setState({
+      status: "reconnecting",
+      jid: state.jid,
+      attempt: state.attempt,
+      nextAttemptAt: null,
+    });
     transport.connect(creds.jid, creds.password, (s) => {
       onTransportStatus(s, myGeneration);
     });
@@ -242,21 +287,29 @@ export function createXmppClient(
     clearStableTimer();
     probe = null;
     const { attempt, at } = scheduler.schedule(attemptNow);
-    setState({ status: 'reconnecting', jid: lastJid, attempt, nextAttemptAt: at });
+    setState({
+      status: "reconnecting",
+      jid: lastJid,
+      attempt,
+      nextAttemptAt: at,
+    });
   }
 
-  function onTransportStatus(status: TransportStatus, myGeneration: number): void {
+  function onTransportStatus(
+    status: TransportStatus,
+    myGeneration: number,
+  ): void {
     if (myGeneration !== generation) return;
     switch (status.kind) {
-      case 'connecting':
+      case "connecting":
         // While retrying, stay 'reconnecting' so the banner keeps its attempt number.
-        if (state.status !== 'reconnecting') setState({ status: 'connecting' });
+        if (state.status !== "reconnecting") setState({ status: "connecting" });
         break;
-      case 'connected':
+      case "connected":
         scheduler.cancel();
         lastJid = status.jid;
         lastProbeAt = Number.NEGATIVE_INFINITY;
-        setState({ status: 'connected', jid: status.jid });
+        setState({ status: "connected", jid: status.jid });
         transport.send(buildPresence());
         hadSession = true;
         clearStableTimer();
@@ -266,21 +319,21 @@ export function createXmppClient(
         }, stableAfterMs);
         rejoinRooms();
         break;
-      case 'disconnecting':
-        if (state.status === 'connecting' || state.status === 'connected') {
-          setState({ status: 'disconnecting' });
+      case "disconnecting":
+        if (state.status === "connecting" || state.status === "connected") {
+          setState({ status: "disconnecting" });
         }
         break;
-      case 'failed': {
+      case "failed": {
         const error: ConnectionError =
           status.condition !== undefined
             ? { reason: status.reason, condition: status.condition }
             : { reason: status.reason };
-        if (status.reason === 'auth-failed') {
+        if (status.reason === "auth-failed") {
           terminate(error);
-        } else if (status.condition === 'conflict') {
+        } else if (status.condition === "conflict") {
           // Another session replaced this one; retrying would only fight it.
-          terminate({ reason: 'connection-lost', condition: 'conflict' });
+          terminate({ reason: "connection-lost", condition: "conflict" });
         } else if (hadSession && !userInitiated) {
           scheduleRetry();
         } else {
@@ -288,15 +341,15 @@ export function createXmppClient(
         }
         break;
       }
-      case 'disconnected':
+      case "disconnected":
         if (userInitiated) {
           terminate();
         } else if (
           hadSession &&
-          (state.status === 'connected' || state.status === 'disconnecting')
+          (state.status === "connected" || state.status === "disconnecting")
         ) {
           scheduleRetry();
-        } else if (state.status === 'reconnecting') {
+        } else if (state.status === "reconnecting") {
           // A preceding 'failed' already scheduled the next attempt; only a bare close needs one.
           if (!scheduler.pending) scheduleRetry();
         } else {
@@ -306,45 +359,54 @@ export function createXmppClient(
     }
   }
 
-  function failJoin(room: TrackedRoom, reason: JoinFailure, condition?: string): void {
+  function failJoin(
+    room: TrackedRoom,
+    reason: JoinFailure,
+    condition?: string,
+  ): void {
     untrack(room);
     emit(
       condition !== undefined
-        ? { type: 'room-join-failed', roomJid: room.roomJid, reason, condition }
-        : { type: 'room-join-failed', roomJid: room.roomJid, reason },
+        ? { type: "room-join-failed", roomJid: room.roomJid, reason, condition }
+        : { type: "room-join-failed", roomJid: room.roomJid, reason },
     );
   }
 
   function handleJoiningPresence(room: TrackedRoom, p: MucPresence): void {
-    if (p.kind === 'error') {
-      const cond = p.errorCondition ?? 'undefined-condition';
-      if (cond === 'conflict' && room.attempt < maxNickRetries) {
+    if (p.kind === "error") {
+      const cond = p.errorCondition ?? "undefined-condition";
+      if (cond === "conflict" && room.attempt < maxNickRetries) {
         room.nick = `${room.baseNick}-${room.attempt + 2}`;
         room.attempt += 1;
         sendJoin(room);
         return;
       }
       if (KNOWN_FAILURES.has(cond)) failJoin(room, cond as JoinFailure);
-      else failJoin(room, 'other', cond);
+      else failJoin(room, "other", cond);
       return;
     }
-    const isSelf = p.statusCodes.has('110') || p.nick === room.nick;
-    if (p.kind === 'available' && !isSelf) {
+    const isSelf = p.statusCodes.has("110") || p.nick === room.nick;
+    if (p.kind === "available" && !isSelf) {
       if (!room.occupants.has(p.nick)) {
         room.occupants.add(p.nick);
-        emit({ type: 'occupant-joined', roomJid: room.roomJid, nick: p.nick, isSelf: false });
+        emit({
+          type: "occupant-joined",
+          roomJid: room.roomJid,
+          nick: p.nick,
+          isSelf: false,
+        });
       }
       return;
     }
-    if (p.kind === 'unavailable' && isSelf && !room.configuring) {
+    if (p.kind === "unavailable" && isSelf && !room.configuring) {
       // e.g. the room was destroyed mid-join; fail now instead of waiting for the join timer.
-      failJoin(room, 'other', 'unavailable');
+      failJoin(room, "other", "unavailable");
       return;
     }
-    if (p.kind !== 'available' || room.configuring) return;
+    if (p.kind !== "available" || room.configuring) return;
     // The server's resource is the real nick (handles status 210).
     room.nick = p.nick;
-    if (!p.statusCodes.has('201')) {
+    if (!p.statusCodes.has("201")) {
       markJoined(room, false);
       return;
     }
@@ -354,73 +416,101 @@ export function createXmppClient(
     // TEMPORARY (Phase 3): the single call site of room creation.
     void acceptInstantRoom(transport, room.roomJid, iqTimeoutMs).then((res) => {
       // A drop and rejoin while the IQ was in flight makes this result stale.
-      if (generation !== gen || room.state !== 'joining' || !room.configuring) return;
+      if (generation !== gen || room.state !== "joining" || !room.configuring)
+        return;
       if (rooms.get(room.roomJid) !== room) return;
       if (res.ok) {
         markJoined(room, true);
       } else {
         transport.send(buildLeavePresence(room.roomJid, room.nick));
-        failJoin(room, 'room-config-failed', res.condition);
+        failJoin(room, "room-config-failed", res.condition);
       }
     });
   }
 
   function markJoined(room: TrackedRoom, created: boolean): void {
     clearTimer(room);
-    room.state = 'joined';
+    room.state = "joined";
     room.configuring = false;
     room.occupants.add(room.nick);
-    emit({ type: 'occupant-joined', roomJid: room.roomJid, nick: room.nick, isSelf: true });
-    emit({ type: 'room-joined', roomJid: room.roomJid, nick: room.nick, created });
+    emit({
+      type: "occupant-joined",
+      roomJid: room.roomJid,
+      nick: room.nick,
+      isSelf: true,
+    });
+    emit({
+      type: "room-joined",
+      roomJid: room.roomJid,
+      nick: room.nick,
+      created,
+    });
     startHistory(room);
   }
 
   function startHistory(room: TrackedRoom): void {
-    if (state.status !== 'connected' || room.state !== 'joined' || room.mam || room.mamTimer) {
+    if (
+      state.status !== "connected" ||
+      room.state !== "joined" ||
+      room.mam ||
+      room.mamTimer
+    ) {
       return;
     }
     room.liveSinceHistory = false;
     // A live message may set lastSeenId before the first load finished; only a completed
     // initial load makes the anchor a valid gap start.
-    const direction: HistoryDirection =
-      room.initialDone && room.lastSeenId !== null ? 'gap' : 'initial';
-    emit({ type: 'history-loading', roomJid: room.roomJid, direction });
-    schedulePage(room, direction, direction === 'gap' ? room.lastSeenId : null, 1);
+    const cursor: Cursor =
+      room.initialDone && room.lastSeenId !== null
+        ? { direction: "gap", after: room.lastSeenId }
+        : { direction: "initial" };
+    emit({
+      type: "history-loading",
+      roomJid: room.roomJid,
+      direction: cursor.direction,
+    });
+    schedulePage(room, cursor, 1);
   }
 
-  function schedulePage(
-    room: TrackedRoom,
-    direction: HistoryDirection,
-    after: string | null,
-    page: number,
-  ): void {
+  function schedulePage(room: TrackedRoom, cursor: Cursor, page: number): void {
     const wait = Math.max(0, nextMamAt - now());
     nextMamAt = now() + wait + mamMinIntervalMs;
     if (wait === 0) {
-      sendPage(room, direction, after, page);
+      sendPage(room, cursor, page);
       return;
     }
     // Mark the query as queued so retry/startHistory cannot double up.
     // startMs is never used for parsing: results are ignored while queryId === ''.
-    room.mam = { queryId: '', direction, page, buffer: [], startMs: 0 };
+    room.mam = {
+      queryId: "",
+      direction: cursor.direction,
+      page,
+      buffer: [],
+      startMs: 0,
+    };
     room.mamTimer = setTimeout(() => {
       room.mamTimer = null;
       room.mam = null;
-      if (rooms.get(room.roomJid) !== room || room.state !== 'joined') return;
-      sendPage(room, direction, after, page);
+      if (rooms.get(room.roomJid) !== room || room.state !== "joined") return;
+      sendPage(room, cursor, page);
     }, wait);
   }
 
-  function failHistory(room: TrackedRoom, direction: HistoryDirection, condition: string): void {
-    emit({ type: 'history-failed', roomJid: room.roomJid, direction, condition });
-  }
-
-  function sendPage(
+  function failHistory(
     room: TrackedRoom,
     direction: HistoryDirection,
-    after: string | null,
-    page: number,
+    condition: string,
   ): void {
+    emit({
+      type: "history-failed",
+      roomJid: room.roomJid,
+      direction,
+      condition,
+    });
+  }
+
+  function sendPage(room: TrackedRoom, cursor: Cursor, page: number): void {
+    const direction = cursor.direction;
     const g = generation;
     const queryId = newId();
     const startMs = now() - historyWindowMs;
@@ -431,13 +521,18 @@ export function createXmppClient(
       queryId,
       startIso: new Date(startMs).toISOString(),
       max: mamPageSize,
-      page: after === null ? { before: true } : { after },
+      page:
+        cursor.direction === "initial"
+          ? { before: true }
+          : cursor.direction === "gap"
+            ? { after: cursor.after }
+            : { before: cursor.before },
     });
     void transport.sendIQ(query, mamTimeoutMs).then((res) => {
       if (
         generation !== g ||
         rooms.get(room.roomJid) !== room ||
-        room.state !== 'joined' ||
+        room.state !== "joined" ||
         room.mam?.queryId !== queryId
       ) {
         return;
@@ -445,12 +540,37 @@ export function createXmppClient(
       const buffer = room.mam.buffer;
       room.mam = null;
       if (!res.ok) {
-        if (direction === 'gap' && page === 1 && res.condition === 'item-not-found') {
+        if (
+          cursor.direction === "earlier" &&
+          res.condition === "item-not-found"
+        ) {
+          // The anchor is purged or older than the window: nothing earlier is left.
+          room.firstId = null;
+          emit({
+            type: "history-loaded",
+            roomJid: room.roomJid,
+            direction: "earlier",
+            anchorId: cursor.before,
+            messages: [],
+            done: true,
+            complete: true,
+          });
+          return;
+        }
+        if (
+          direction === "gap" &&
+          page === 1 &&
+          res.condition === "item-not-found"
+        ) {
           // The anchor is gone (e.g. purged): fall back to the newest page, once.
           room.lastSeenId = null;
           room.initialDone = false;
-          emit({ type: 'history-loading', roomJid: room.roomJid, direction: 'initial' });
-          schedulePage(room, 'initial', null, 1);
+          emit({
+            type: "history-loading",
+            roomJid: room.roomJid,
+            direction: "initial",
+          });
+          schedulePage(room, { direction: "initial" }, 1);
           return;
         }
         failHistory(room, direction, res.condition);
@@ -458,7 +578,7 @@ export function createXmppClient(
       }
       const fin = parseMamFin(res.stanza);
       if (fin === null) {
-        failHistory(room, direction, 'bad-response');
+        failHistory(room, direction, "bad-response");
         return;
       }
       const messages: ChatMessage[] = buffer.map((item) => ({
@@ -470,90 +590,133 @@ export function createXmppClient(
         isHistory: true,
         isOwn: item.nick !== null && item.nick === room.nick,
       }));
-      const lastItem = buffer.at(-1);
-      if (!room.liveSinceHistory && lastItem !== undefined) room.lastSeenId = lastItem.id;
-      if (direction === 'initial') {
-        room.initialDone = true;
+      const nextFirst = fin.first ?? buffer[0]?.id ?? null;
+      if (cursor.direction === "earlier") {
+        // nextFirst === cursor.before: no progress, so stop rather than loop on the same page.
+        const complete =
+          fin.complete ||
+          buffer.length === 0 ||
+          nextFirst === null ||
+          nextFirst === cursor.before;
+        room.firstId = complete ? null : nextFirst;
         emit({
-          type: 'history-loaded',
+          type: "history-loaded",
           roomJid: room.roomJid,
-          direction,
+          direction: "earlier",
+          anchorId: cursor.before,
           messages,
           done: true,
-          complete: fin.complete,
+          complete,
         });
         return;
       }
+      // Earlier pages returned above: they must not move the catch-up anchor.
+      const lastItem = buffer.at(-1);
+      if (!room.liveSinceHistory && lastItem !== undefined)
+        room.lastSeenId = lastItem.id;
+      if (cursor.direction === "initial") {
+        room.initialDone = true;
+        const complete =
+          fin.complete || buffer.length === 0 || nextFirst === null;
+        if (room.firstId === null) room.firstId = complete ? null : nextFirst;
+        emit({
+          type: "history-loaded",
+          roomJid: room.roomJid,
+          direction: "initial",
+          messages,
+          done: true,
+          complete,
+        });
+        return;
+      }
+      // fin.last === cursor.after: no progress; stop and report complete (nothing more to fetch).
+      const stalled = fin.last === cursor.after;
       const done =
-        fin.complete || buffer.length === 0 || fin.last === null || page >= mamMaxGapPages;
+        fin.complete ||
+        stalled ||
+        buffer.length === 0 ||
+        fin.last === null ||
+        page >= mamMaxGapPages;
       emit({
-        type: 'history-loaded',
+        type: "history-loaded",
         roomJid: room.roomJid,
-        direction,
+        direction: "gap",
         messages,
         done,
-        complete: fin.complete,
+        complete: fin.complete || stalled,
       });
-      if (!done) schedulePage(room, 'gap', fin.last, page + 1);
+      if (!done && fin.last !== null) {
+        schedulePage(room, { direction: "gap", after: fin.last }, page + 1);
+      }
     });
   }
 
   function handleJoinedPresence(room: TrackedRoom, p: MucPresence): void {
-    if (p.kind === 'error') return;
-    const isSelf = p.statusCodes.has('110') || p.nick === room.nick;
-    if (p.kind === 'available') {
+    if (p.kind === "error") return;
+    const isSelf = p.statusCodes.has("110") || p.nick === room.nick;
+    if (p.kind === "available") {
       if (!isSelf && !room.occupants.has(p.nick)) {
         room.occupants.add(p.nick);
-        emit({ type: 'occupant-joined', roomJid: room.roomJid, nick: p.nick, isSelf: false });
+        emit({
+          type: "occupant-joined",
+          roomJid: room.roomJid,
+          nick: p.nick,
+          isSelf: false,
+        });
       }
       return;
     }
     if (!isSelf) {
       if (room.occupants.delete(p.nick)) {
-        emit({ type: 'occupant-left', roomJid: room.roomJid, nick: p.nick });
+        emit({ type: "occupant-left", roomJid: room.roomJid, nick: p.nick });
       }
       return;
     }
-    const reason: LeaveReason = p.statusCodes.has('307')
-      ? 'kicked'
-      : p.statusCodes.has('301')
-        ? 'banned'
-        : 'other';
+    const reason: LeaveReason = p.statusCodes.has("307")
+      ? "kicked"
+      : p.statusCodes.has("301")
+        ? "banned"
+        : "other";
     untrack(room);
-    emit({ type: 'room-left', roomJid: room.roomJid, reason });
+    emit({ type: "room-left", roomJid: room.roomJid, reason });
   }
 
   function handlePresence(el: Element): void {
     const p = parseMucPresence(el);
     if (!p) return;
     const room = rooms.get(p.roomJid);
-    if (!room || room.state === 'suspended') return;
-    if (room.state === 'joining') handleJoiningPresence(room, p);
+    if (!room || room.state === "suspended") return;
+    if (room.state === "joining") handleJoiningPresence(room, p);
     else handleJoinedPresence(room, p);
   }
 
   function handleMessage(el: Element): void {
-    const type = el.getAttribute('type');
-    const from = el.getAttribute('from') ?? '';
-    const slash = from.indexOf('/');
+    const type = el.getAttribute("type");
+    const from = el.getAttribute("from") ?? "";
+    const slash = from.indexOf("/");
     const bare = slash < 0 ? from : from.slice(0, slash);
     const room = rooms.get(bare);
     if (!room) return;
     if (isMamResultMessage(el)) {
       // Never a live message. Only accepted while our own query is in flight (anti-spoof inside).
       const mam = room.mam;
-      if (mam && mam.queryId !== '') {
+      if (mam && mam.queryId !== "") {
         const item = parseMamResult(el, {
           roomJid: room.roomJid,
           queryId: mam.queryId,
           notBefore: mam.startMs,
         });
-        if (item !== null && mam.buffer.length < mamPageSize) mam.buffer.push(item);
+        if (item !== null && mam.buffer.length < mamPageSize)
+          mam.buffer.push(item);
       }
       return;
     }
-    if (type === 'error') {
-      emit({ type: 'message-error', roomJid: room.roomJid, condition: parseErrorCondition(el) });
+    if (type === "error") {
+      emit({
+        type: "message-error",
+        roomJid: room.roomJid,
+        condition: parseErrorCondition(el),
+      });
       return;
     }
     const m = parseGroupchat(el);
@@ -564,12 +727,12 @@ export function createXmppClient(
       room.liveSinceHistory = true;
     }
     emit({
-      type: 'message',
+      type: "message",
       message: {
         id:
           m.stanzaId ??
           m.id ??
-          `${room.roomJid}|${sentAt}|${m.nick ?? ''}|${m.body.length}`,
+          `${room.roomJid}|${sentAt}|${m.nick ?? ""}|${m.body.length}`,
         roomJid: room.roomJid,
         nick: m.nick,
         body: m.body,
@@ -582,17 +745,18 @@ export function createXmppClient(
 
   function onStanza(el: Element): void {
     switch (el.localName) {
-      case 'presence':
+      case "presence":
         handlePresence(el);
         break;
-      case 'message':
+      case "message":
         handleMessage(el);
         break;
-      case 'iq': {
-        const type = el.getAttribute('type');
+      case "iq": {
+        const type = el.getAttribute("type");
         // XEP-0199: the server's keepalive ping must be answered or mod_ping kills the session.
         if (isPingRequest(el)) transport.send(buildIqResult(el));
-        else if (type === 'get' || type === 'set') transport.send(buildIqErrorReply(el));
+        else if (type === "get" || type === "set")
+          transport.send(buildIqErrorReply(el));
         break;
       }
     }
@@ -604,43 +768,44 @@ export function createXmppClient(
     getState: () => state,
 
     connect(jid, password) {
-      if (state.status !== 'idle' && state.status !== 'disconnected') return;
+      if (state.status !== "idle" && state.status !== "disconnected") return;
       const myGeneration = ++generation;
       userInitiated = false;
       hadSession = false;
       scheduler.reset();
       creds = { jid, password };
       lastJid = jid;
-      setState({ status: 'connecting' });
+      setState({ status: "connecting" });
       transport.connect(jid, password, (s) => {
         onTransportStatus(s, myGeneration);
       });
     },
 
     disconnect() {
-      if (state.status === 'reconnecting') {
+      if (state.status === "reconnecting") {
         // Nothing live to close politely: cancel the retry and go terminal now.
         userInitiated = true;
         generation++;
         scheduler.cancel();
-        transport.disconnect('user');
+        transport.disconnect("user");
         terminate();
         return;
       }
-      if (state.status !== 'connecting' && state.status !== 'connected') return;
+      if (state.status !== "connecting" && state.status !== "connected") return;
       userInitiated = true;
-      setState({ status: 'disconnecting' });
-      transport.disconnect('user');
+      setState({ status: "disconnecting" });
+      transport.disconnect("user");
     },
 
     wake(trigger) {
       // Only tab-visibility flaps are throttled; 'online' and 'user' are deliberate and act at once.
-      const throttled = trigger === 'visible';
-      if (state.status === 'reconnecting') {
-        if (!throttled || now() - lastAttemptAt >= wakeMinIntervalMs) scheduler.fireNow();
+      const throttled = trigger === "visible";
+      if (state.status === "reconnecting") {
+        if (!throttled || now() - lastAttemptAt >= wakeMinIntervalMs)
+          scheduler.fireNow();
         return;
       }
-      if (state.status !== 'connected' || probe !== null) return;
+      if (state.status !== "connected" || probe !== null) return;
       if (throttled && now() - lastProbeAt < probeMinIntervalMs) return;
       lastProbeAt = now();
       const mine = {};
@@ -652,32 +817,32 @@ export function createXmppClient(
           if (probe !== mine) return;
           probe = null;
           // Any reply, even an error, proves the link is alive. Only silence means it is not.
-          if (res.ok || res.condition !== 'timeout') return;
-          if (generation !== g || state.status !== 'connected') return;
+          if (res.ok || res.condition !== "timeout") return;
+          if (generation !== g || state.status !== "connected") return;
           generation++;
-          transport.disconnect('stale');
+          transport.disconnect("stale");
           scheduleRetry();
         });
     },
 
     joinRoom(roomJid, nick) {
-      if (state.status !== 'connected') {
-        emit({ type: 'room-join-failed', roomJid, reason: 'not-connected' });
+      if (state.status !== "connected") {
+        emit({ type: "room-join-failed", roomJid, reason: "not-connected" });
         return;
       }
       if (!isValidRoomJid(roomJid, options.mucDomain)) {
-        emit({ type: 'room-join-failed', roomJid, reason: 'invalid-room' });
+        emit({ type: "room-join-failed", roomJid, reason: "invalid-room" });
         return;
       }
       const baseNick = normalizeNick(nick);
       if (baseNick === null) {
-        emit({ type: 'room-join-failed', roomJid, reason: 'invalid-nick' });
+        emit({ type: "room-join-failed", roomJid, reason: "invalid-nick" });
         return;
       }
       if (rooms.has(roomJid)) return;
       const room: TrackedRoom = {
         roomJid,
-        state: 'joining',
+        state: "joining",
         baseNick,
         nick: baseNick,
         attempt: 0,
@@ -685,6 +850,7 @@ export function createXmppClient(
         occupants: new Set(),
         timer: null,
         lastSeenId: null,
+        firstId: null,
         initialDone: false,
         liveSinceHistory: false,
         mam: null,
@@ -698,20 +864,23 @@ export function createXmppClient(
       const room = rooms.get(roomJid);
       if (!room) return;
       // A suspended room has no live presence to retract, and nothing can be sent while offline.
-      if (room.state !== 'suspended' && state.status === 'connected') {
+      if (room.state !== "suspended" && state.status === "connected") {
         transport.send(buildLeavePresence(room.roomJid, room.nick));
       }
       untrack(room);
-      emit({ type: 'room-left', roomJid, reason: 'self' });
+      emit({ type: "room-left", roomJid, reason: "self" });
     },
 
     sendGroupchat(roomJid, body): SendResult {
       const text = body.trim();
-      if (text === '') return { ok: false, error: 'empty' };
-      if ([...text].length > MAX_MESSAGE_LENGTH) return { ok: false, error: 'too-long' };
-      if (state.status !== 'connected') return { ok: false, error: 'not-connected' };
+      if (text === "") return { ok: false, error: "empty" };
+      if ([...text].length > MAX_MESSAGE_LENGTH)
+        return { ok: false, error: "too-long" };
+      if (state.status !== "connected")
+        return { ok: false, error: "not-connected" };
       const room = rooms.get(roomJid);
-      if (!room || room.state !== 'joined') return { ok: false, error: 'not-joined' };
+      if (!room || room.state !== "joined")
+        return { ok: false, error: "not-joined" };
       const id = newId();
       transport.send(buildGroupchat(roomJid, text, id));
       return { ok: true, id };
@@ -720,6 +889,27 @@ export function createXmppClient(
     retryHistory(roomJid) {
       const room = rooms.get(roomJid);
       if (room) startHistory(room);
+    },
+
+    loadEarlier(roomJid) {
+      const room = rooms.get(roomJid);
+      if (
+        state.status !== "connected" ||
+        !room ||
+        room.state !== "joined" ||
+        !room.initialDone ||
+        room.firstId === null ||
+        room.mam !== null ||
+        room.mamTimer !== null
+      ) {
+        return;
+      }
+      emit({
+        type: "history-loading",
+        roomJid: room.roomJid,
+        direction: "earlier",
+      });
+      schedulePage(room, { direction: "earlier", before: room.firstId }, 1);
     },
 
     subscribe(listener) {

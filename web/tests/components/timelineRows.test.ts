@@ -84,6 +84,26 @@ describe('toTimelineRows', () => {
     expect(rows[3]?.key).toBe('earlier-divider');
   });
 
+  it('earlier history prepended above the history and live block keeps one divider after the same last history message', () => {
+    const before = toTimelineRows([
+      msg('h1', 'bob', { history: true }),
+      msg('h2', 'bob', { history: true }),
+      msg('live', 'carol'),
+    ]);
+    const after = toTimelineRows([
+      msg('e1', 'dave', { history: true }),
+      msg('e2', 'dave', { history: true }),
+      msg('h1', 'bob', { history: true }),
+      msg('h2', 'bob', { history: true }),
+      msg('live', 'carol'),
+    ]);
+    expect(after.filter((r) => r.kind === 'divider')).toHaveLength(1);
+    const dividerAt = after.findIndex((r) => r.kind === 'divider');
+    expect(after[dividerAt - 1]?.key).toBe('m-h2');
+    expect(after[dividerAt + 1]?.key).toBe('m-live');
+    expect(before.findIndex((r) => r.kind === 'divider')).toBe(2);
+  });
+
   it('turns nick-null messages into system rows', () => {
     expect(toTimelineRows([msg('1', null)])).toEqual([
       { kind: 'system', key: 'm-1', text: 'body-1', at: 0 },

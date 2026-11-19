@@ -1225,6 +1225,16 @@ describe("history (MAM)", () => {
   const hasTag = (ctx: Ctx, i: number, tag: string): boolean =>
     ctx.t.iqs[i]?.querySelector(tag) != null;
 
+  /** MongooseIM ignores RSM children carrying any attribute: assert the sent <set> is bare. */
+  const expectBareSet = (ctx: Ctx, i: number, names: string[]): void => {
+    const set = ctx.t.iqs[i]?.querySelector("set");
+    expect(set?.namespaceURI).toBe("http://jabber.org/protocol/rsm");
+    expect(Array.from(set?.children ?? []).map((c) => c.localName)).toEqual(names);
+    for (const c of Array.from(set?.children ?? [])) {
+      expect(c.attributes.length).toBe(0);
+    }
+  };
+
   const afterOf = (ctx: Ctx, i: number): string | null =>
     ctx.t.iqs[i]?.querySelector("after")?.textContent ?? null;
 
@@ -1395,6 +1405,29 @@ describe("history (MAM)", () => {
     expect(ctx.t.iqs).toHaveLength(2);
     expect(afterOf(ctx, 1)).toBe("S1");
     expect(hasTag(ctx, 1, "before")).toBe(false);
+  });
+
+  it("wire shape: initial query <set> children carry no attributes", () => {
+    const ctx = setupH();
+    connect(ctx);
+    joined(ctx);
+    expectBareSet(ctx, 0, ["max", "before"]);
+  });
+
+  it("wire shape: gap query <set> children carry no attributes", async () => {
+    const ctx = setupH();
+    await reachGap(ctx);
+    expectBareSet(ctx, 1, ["max", "after"]);
+  });
+
+  it("gap: a fin.last equal to the cursor ends paging without a truncated notice", async () => {
+    const ctx = setupH();
+    await reachGap(ctx);
+    result(ctx, 1, "G1", "gap one");
+    await finish(ctx, 1, false, "A1");
+    expect(loaded(ctx).at(-1)).toMatchObject({ direction: "gap", done: true, complete: true });
+    advance(10_000);
+    expect(ctx.t.iqs).toHaveLength(2);
   });
 
   it("pages the gap forward, one query per 1100 ms, and stops when complete", async () => {
@@ -1677,5 +1710,511 @@ describe("history (MAM)", () => {
     } finally {
       for (const s of spies) s.mockRestore();
     }
+  });
+
+  describe("history: load earlier", () => {
+    const beforeOf = (ctx: Ctx, i: number): string | null =>
+      ctx.t.iqs[i]?.querySelector("before")?.textContent ?? null;
+
+    const finRsm = (complete: boolean, first: string | null, last: string | null): Element =>
+      parse(
+        `<iq type='result'><fin xmlns='urn:xmpp:mam:2' complete='${String(complete)}'><set xmlns='http://jabber.org/protocol/rsm'>${
+          first === null ? "" : `<first index='0'>${first}</first>`
+        }${last === null ? "" : `<last>${last}</last>`}</set></fin></iq>`,
+      );
+
+    const finishRsm = async (
+      ctx: Ctx,
+      i: number,
+      complete: boolean,
+      first: string | null,
+      last: string | null = null,
+    ): Promise<void> => {
+      ctx.t.resolveIq(i, { ok: true, stanza: finRsm(complete, first, last) });
+      await flush();
+    };
+
+    const loadings = (ctx: Ctx): XmppEvent[] =>
+      ctx.events.filter((e) => e.type === "history-loading" && e.direction === "earlier");
+
+    /** Joined, initial page A1,A2 loaded with fin first=F1 (incomplete). iqs: [initial]. */
+    async function reachEarlier(ctx: Ctx): Promise<void> {
+      connect(ctx);
+      joined(ctx);
+      result(ctx, 0, "A1", "one");
+      result(ctx, 0, "A2", "two");
+      await finishRsm(ctx, 0, false, "F1", "A2");
+    }
+
+    /** Sends the earlier query and returns its IQ index (iqs.length - 1). */
+    function sendEarlier(ctx: Ctx): number {
+      ctx.client.loadEarlier(ROOM);
+      advance(1100);
+      return ctx.t.iqs.length - 1;
+    }
+
+    function dropAndRejoin(ctx: Ctx): void {
+      ctx.t.pushStatus({ kind: "disconnected" });
+      advance(1000);
+      ctx.t.pushStatus({ kind: "connecting" });
+      ctx.t.pushStatus({ kind: "connected", jid: JID2 });
+      ctx.t.pushStanza(presence("alice", ["110"]));
+    }
+
+    it("lastSeenId regression: an earlier page does not move the catch-up anchor (no live message)", async () => {
+      const ctx = setupH();
+      await reachEarlier(ctx);
+      const i = sendEarlier(ctx);
+      result(ctx, i, "E1", "older 1");
+      result(ctx, i, "E50", "older 50");
+      await finishRsm(ctx, i, false, "F2", "E50");
+      dropAndRejoin(ctx);
+      advance(1100);
+      expect(ctx.t.iqs).toHaveLength(3);
+      expect(afterOf(ctx, 2)).toBe("A2");
+    });
+
+    it("lastSeenId regression: a live id stays the catch-up anchor after an earlier page", async () => {
+      const ctx = setupH();
+      await reachEarlier(ctx);
+      ctx.t.pushStanza(liveWithSid("S1"));
+      const i = sendEarlier(ctx);
+      result(ctx, i, "E50", "older 50");
+      await finishRsm(ctx, i, false, "F2", "E50");
+      dropAndRejoin(ctx);
+      advance(1100);
+      expect(afterOf(ctx, 2)).toBe("S1");
+    });
+
+    it("pages backwards: before=firstId, start = now-24h, max 50, results in server order", async () => {
+      const ctx = setupH();
+      await reachEarlier(ctx);
+      expect(loaded(ctx).at(-1)).toMatchObject({ direction: "initial", complete: false });
+      ctx.client.loadEarlier(ROOM);
+      expect(ctx.events.at(-1)).toEqual({
+        type: "history-loading",
+        roomJid: ROOM,
+        direction: "earlier",
+      });
+      advance(1100);
+      expect(ctx.t.iqs).toHaveLength(2);
+      const iq = ctx.t.iqs[1];
+      expect(iq?.getAttribute("to")).toBe(ROOM);
+      expect(beforeOf(ctx, 1)).toBe("F1");
+      expectBareSet(ctx, 1, ["max", "before"]);
+      expect(iq?.querySelector("after")).toBeNull();
+      expect(iq?.querySelector("max")?.textContent).toBe("50");
+      const start = Array.from(iq?.querySelectorAll("field") ?? []).find(
+        (f) => f.getAttribute("var") === "start",
+      );
+      expect(start?.textContent).toBe(new Date(T0 + 1100 - 86_400_000).toISOString());
+
+      result(ctx, 1, "E1", "old one");
+      result(ctx, 1, "E2", "old two", "carol");
+      await finishRsm(ctx, 1, false, "F2", "E2");
+      const ev = loaded(ctx).at(-1);
+      expect(ev).toMatchObject({
+        roomJid: ROOM,
+        direction: "earlier",
+        anchorId: "F1",
+        done: true,
+        complete: false,
+      });
+      expect(ev?.messages.map((m) => [m.id, m.nick, m.isHistory])).toEqual([
+        ["E1", "bob", true],
+        ["E2", "carol", true],
+      ]);
+
+      expect(sendEarlier(ctx)).toBe(2);
+      expect(beforeOf(ctx, 2)).toBe("F2");
+    });
+
+    it("wire shape: earlier query <set> children carry no attributes", async () => {
+      const ctx = setupH();
+      await reachEarlier(ctx);
+      const i = sendEarlier(ctx);
+      expectBareSet(ctx, i, ["max", "before"]);
+    });
+
+    it("an earlier page whose first equals the cursor is treated as complete", async () => {
+      const ctx = setupH();
+      await reachEarlier(ctx);
+      const i = sendEarlier(ctx);
+      result(ctx, i, "E1", "old");
+      await finishRsm(ctx, i, false, "F1", "E1");
+      expect(loaded(ctx).at(-1)).toMatchObject({ direction: "earlier", complete: true });
+      const count = ctx.events.length;
+      ctx.client.loadEarlier(ROOM);
+      advance(5000);
+      expect(ctx.t.iqs).toHaveLength(2);
+      expect(ctx.events).toHaveLength(count);
+    });
+
+    it("a complete final page reports complete and later calls do nothing", async () => {
+      const ctx = setupH();
+      await reachEarlier(ctx);
+      const i = sendEarlier(ctx);
+      result(ctx, i, "E1", "old");
+      await finishRsm(ctx, i, true, "F2", "E1");
+      expect(loaded(ctx).at(-1)).toMatchObject({ direction: "earlier", complete: true });
+      const count = ctx.events.length;
+      ctx.client.loadEarlier(ROOM);
+      advance(5000);
+      expect(ctx.t.iqs).toHaveLength(2);
+      expect(ctx.events).toHaveLength(count);
+    });
+
+    it("an empty page with complete=false is reported as complete", async () => {
+      const ctx = setupH();
+      await reachEarlier(ctx);
+      const i = sendEarlier(ctx);
+      await finishRsm(ctx, i, false, null, null);
+      expect(loaded(ctx).at(-1)).toMatchObject({
+        direction: "earlier",
+        messages: [],
+        complete: true,
+      });
+      ctx.client.loadEarlier(ROOM);
+      advance(5000);
+      expect(ctx.t.iqs).toHaveLength(2);
+    });
+
+    it("a fin without <first> falls back to the first result id for the next cursor", async () => {
+      const ctx = setupH();
+      await reachEarlier(ctx);
+      const i = sendEarlier(ctx);
+      result(ctx, i, "E1", "a");
+      result(ctx, i, "E2", "b");
+      await finishRsm(ctx, i, false, null, "E2");
+      expect(loaded(ctx).at(-1)).toMatchObject({ direction: "earlier", complete: false });
+      expect(sendEarlier(ctx)).toBe(2);
+      expect(beforeOf(ctx, 2)).toBe("E1");
+    });
+
+    it("an empty initial page without <first> is complete, so nothing earlier is offered", async () => {
+      const ctx = setupH();
+      connect(ctx);
+      joined(ctx);
+      await finishRsm(ctx, 0, false, null, null);
+      expect(loaded(ctx).at(-1)).toMatchObject({ direction: "initial", complete: true });
+      ctx.client.loadEarlier(ROOM);
+      advance(5000);
+      expect(ctx.t.iqs).toHaveLength(1);
+    });
+
+    it("a complete initial page offers no earlier query", async () => {
+      const ctx = setupH();
+      connect(ctx);
+      joined(ctx);
+      result(ctx, 0, "A1", "only");
+      await finishRsm(ctx, 0, true, "A1", "A1");
+      const count = ctx.events.length;
+      ctx.client.loadEarlier(ROOM);
+      advance(5000);
+      expect(ctx.t.iqs).toHaveLength(1);
+      expect(ctx.events).toHaveLength(count);
+    });
+
+    describe("guards", () => {
+      it("does nothing before the initial load is done", () => {
+        const ctx = setupH();
+        connect(ctx);
+        joined(ctx);
+        const count = ctx.events.length;
+        ctx.client.loadEarlier(ROOM);
+        advance(5000);
+        expect(ctx.t.iqs).toHaveLength(1);
+        expect(ctx.events).toHaveLength(count);
+      });
+
+      it("does nothing while a gap query is queued or in flight", async () => {
+        const ctx = setupH();
+        await reachEarlier(ctx);
+        dropAndRejoin(ctx);
+        // The gap query is queued behind the throttle.
+        let count = ctx.events.length;
+        ctx.client.loadEarlier(ROOM);
+        expect(ctx.events).toHaveLength(count);
+        advance(1100);
+        expect(ctx.t.iqs).toHaveLength(2);
+        // ... and now in flight.
+        count = ctx.events.length;
+        ctx.client.loadEarlier(ROOM);
+        advance(5000);
+        expect(ctx.t.iqs).toHaveLength(2);
+        expect(ctx.events).toHaveLength(count);
+      });
+
+      it("does nothing while an earlier page is queued or in flight; a double call sends one query", async () => {
+        const ctx = setupH();
+        await reachEarlier(ctx);
+        ctx.client.loadEarlier(ROOM);
+        ctx.client.loadEarlier(ROOM);
+        expect(loadings(ctx)).toHaveLength(1);
+        advance(1100);
+        expect(ctx.t.iqs).toHaveLength(2);
+        ctx.client.loadEarlier(ROOM);
+        advance(5000);
+        expect(ctx.t.iqs).toHaveLength(2);
+        expect(loadings(ctx)).toHaveLength(1);
+      });
+
+      it("does nothing for an unknown, joining or suspended room", async () => {
+        const ctx = setupH();
+        await reachEarlier(ctx);
+        ctx.client.loadEarlier(ROOM2);
+        ctx.t.pushStatus({ kind: "disconnected" });
+        const count = ctx.events.length;
+        ctx.client.loadEarlier(ROOM);
+        expect(ctx.events).toHaveLength(count);
+        // Reconnected but not yet re-joined.
+        advance(1000);
+        ctx.t.pushStatus({ kind: "connecting" });
+        ctx.t.pushStatus({ kind: "connected", jid: JID2 });
+        const count2 = ctx.events.length;
+        ctx.client.loadEarlier(ROOM);
+        expect(ctx.events).toHaveLength(count2);
+        advance(5000);
+        expect(ctx.t.iqs).toHaveLength(1);
+      });
+    });
+
+    describe("throttle", () => {
+      it("waits for the global minimum interval after the initial query", async () => {
+        const ctx = setupH();
+        await reachEarlier(ctx);
+        advance(500);
+        ctx.client.loadEarlier(ROOM);
+        advance(599);
+        expect(ctx.t.iqs).toHaveLength(1);
+        advance(1);
+        expect(ctx.t.iqs).toHaveLength(2);
+      });
+
+      it("spaces earlier queries of two rooms at least 1100 ms apart", async () => {
+        const ctx = setupH();
+        connect(ctx);
+        joined(ctx);
+        joined(ctx, ROOM2);
+        advance(1100);
+        expect(ctx.t.iqs).toHaveLength(2);
+        result(ctx, 0, "A1", "one");
+        ctx.t.pushStanza(
+          mamResult({
+            queryId: qid(ctx, 1),
+            id: "B1",
+            stamp: STAMP,
+            from: ROOM2,
+            inner: `<message from='${ROOM2}/bob' type='groupchat'><body>two</body></message>`,
+          }),
+        );
+        await finishRsm(ctx, 0, false, "F1", "A1");
+        await finishRsm(ctx, 1, false, "B1", "B1");
+        ctx.client.loadEarlier(ROOM);
+        ctx.client.loadEarlier(ROOM2);
+        advance(1099);
+        expect(ctx.t.iqs).toHaveLength(2);
+        advance(1);
+        expect(ctx.t.iqs).toHaveLength(3);
+        expect(ctx.t.iqs[2]?.getAttribute("to")).toBe(ROOM);
+        advance(1099);
+        expect(ctx.t.iqs).toHaveLength(3);
+        advance(1);
+        expect(ctx.t.iqs).toHaveLength(4);
+        expect(ctx.t.iqs[3]?.getAttribute("to")).toBe(ROOM2);
+      });
+    });
+
+    describe("errors", () => {
+      it.each(["timeout", "resource-constraint", "service-unavailable"])(
+        "reports %s as history-failed {earlier}, never retries, and a manual retry reuses the same cursor",
+        async (condition) => {
+          const ctx = setupH();
+          await reachEarlier(ctx);
+          const i = sendEarlier(ctx);
+          ctx.t.resolveIq(i, { ok: false, condition });
+          await flush();
+          expect(ctx.events.at(-1)).toEqual({
+            type: "history-failed",
+            roomJid: ROOM,
+            direction: "earlier",
+            condition,
+          });
+          advance(60_000);
+          expect(ctx.t.iqs).toHaveLength(2);
+          ctx.client.loadEarlier(ROOM);
+          advance(1100);
+          expect(ctx.t.iqs).toHaveLength(3);
+          expect(beforeOf(ctx, 2)).toBe("F1");
+        },
+      );
+
+      it("reports a fin-less result as bad-response", async () => {
+        const ctx = setupH();
+        await reachEarlier(ctx);
+        const i = sendEarlier(ctx);
+        ctx.t.resolveIq(i, { ok: true, stanza: parse("<iq type='result'/>") });
+        await flush();
+        expect(ctx.events.at(-1)).toMatchObject({
+          type: "history-failed",
+          direction: "earlier",
+          condition: "bad-response",
+        });
+      });
+
+      it("item-not-found means nothing earlier: loaded {complete} and later calls do nothing", async () => {
+        const ctx = setupH();
+        await reachEarlier(ctx);
+        const i = sendEarlier(ctx);
+        ctx.t.resolveIq(i, { ok: false, condition: "item-not-found" });
+        await flush();
+        expect(loaded(ctx).at(-1)).toEqual({
+          type: "history-loaded",
+          roomJid: ROOM,
+          direction: "earlier",
+          anchorId: "F1",
+          messages: [],
+          done: true,
+          complete: true,
+        });
+        expect(types(ctx.events)).not.toContain("history-failed");
+        ctx.client.loadEarlier(ROOM);
+        advance(5000);
+        expect(ctx.t.iqs).toHaveLength(2);
+      });
+    });
+
+    describe("firstId lifecycle", () => {
+      it("survives a drop and rejoin", async () => {
+        const ctx = setupH();
+        await reachEarlier(ctx);
+        const i = sendEarlier(ctx);
+        result(ctx, i, "E1", "old");
+        await finishRsm(ctx, i, false, "F2", "E1");
+        dropAndRejoin(ctx);
+        advance(1100);
+        expect(afterOf(ctx, 2)).toBe("A2");
+        await finishRsm(ctx, 2, true, null, null);
+        expect(sendEarlier(ctx)).toBe(3);
+        expect(beforeOf(ctx, 3)).toBe("F2");
+      });
+
+      it("is unchanged by a gap item-not-found fallback to a new initial page", async () => {
+        const ctx = setupH();
+        await reachEarlier(ctx);
+        const i = sendEarlier(ctx);
+        result(ctx, i, "E1", "old");
+        await finishRsm(ctx, i, false, "F2", "E1");
+        dropAndRejoin(ctx);
+        advance(1100);
+        ctx.t.resolveIq(2, { ok: false, condition: "item-not-found" });
+        await flush();
+        advance(1100);
+        expect(ctx.t.iqs).toHaveLength(4);
+        expect(hasTag(ctx, 3, "after")).toBe(false);
+        result(ctx, 3, "N1", "fresh");
+        await finishRsm(ctx, 3, false, "FX", "N1");
+        expect(sendEarlier(ctx)).toBe(4);
+        expect(beforeOf(ctx, 4)).toBe("F2");
+      });
+
+      it("a leave and join builds a new cursor from the new initial page", async () => {
+        const ctx = setupH();
+        await reachEarlier(ctx);
+        ctx.client.leaveRoom(ROOM);
+        joined(ctx);
+        advance(1100);
+        expect(ctx.t.iqs).toHaveLength(2);
+        result(ctx, 1, "N1", "again");
+        await finishRsm(ctx, 1, false, "FN", "N1");
+        expect(sendEarlier(ctx)).toBe(2);
+        expect(beforeOf(ctx, 2)).toBe("FN");
+      });
+    });
+
+    describe("stale results and cleanup", () => {
+      it("ignores an earlier page that resolves after a drop and rejoin", async () => {
+        const ctx = setupH();
+        await reachEarlier(ctx);
+        const i = sendEarlier(ctx);
+        result(ctx, i, "OLD", "stale body");
+        dropAndRejoin(ctx);
+        advance(1100);
+        const count = loaded(ctx).length;
+        await finishRsm(ctx, i, false, "F2", "OLD");
+        expect(loaded(ctx)).toHaveLength(count);
+        expect(loaded(ctx).some((e) => e.direction === "earlier")).toBe(false);
+      });
+
+      it("leaving with an earlier page in flight yields no later events", async () => {
+        const ctx = setupH();
+        await reachEarlier(ctx);
+        const i = sendEarlier(ctx);
+        ctx.client.leaveRoom(ROOM);
+        const count = ctx.events.length;
+        await finishRsm(ctx, i, false, "F2", "E1");
+        expect(ctx.events).toHaveLength(count);
+      });
+
+      it("leaving with an earlier page queued sends nothing later", async () => {
+        const ctx = setupH();
+        await reachEarlier(ctx);
+        ctx.client.loadEarlier(ROOM);
+        ctx.client.leaveRoom(ROOM);
+        const count = ctx.events.length;
+        advance(10_000);
+        expect(ctx.t.iqs).toHaveLength(1);
+        expect(ctx.events).toHaveLength(count);
+      });
+
+      it("a terminal disconnect clears the queued earlier timer", async () => {
+        const ctx = setupH();
+        expect(vi.getTimerCount()).toBe(0);
+        await reachEarlier(ctx);
+        ctx.client.loadEarlier(ROOM);
+        ctx.client.disconnect();
+        ctx.t.pushStatus({ kind: "disconnected" });
+        expect(vi.getTimerCount()).toBe(0);
+        advance(10_000);
+        expect(ctx.t.iqs).toHaveLength(1);
+      });
+    });
+
+    it("drops earlier results with a wrong queryid, a resourceful outer from or another room's from", async () => {
+      const ctx = setupH();
+      await reachEarlier(ctx);
+      const i = sendEarlier(ctx);
+      result(ctx, i, "X1", "spoof1", "bob", { queryId: "nope" });
+      result(ctx, i, "X2", "spoof2", "bob", { from: `${ROOM}/mallory` });
+      result(ctx, i, "X3", "spoof3", "bob", { from: ROOM2 });
+      result(ctx, i, "E1", "genuine");
+      await finishRsm(ctx, i, false, "F2", "E1");
+      expect(loaded(ctx).at(-1)?.messages.map((m) => m.id)).toEqual(["E1"]);
+      expect(types(ctx.events)).not.toContain("message");
+    });
+
+    it("never logs bodies or room addresses from the earlier paths", async () => {
+      const spies = (["log", "info", "warn", "error", "debug"] as const).map((m) =>
+        vi.spyOn(console, m).mockImplementation(() => undefined),
+      );
+      try {
+        const ctx = setupH();
+        await reachEarlier(ctx);
+        let i = sendEarlier(ctx);
+        result(ctx, i, "E1", "secret earlier body");
+        await finishRsm(ctx, i, false, "F2", "E1");
+        i = sendEarlier(ctx);
+        ctx.t.resolveIq(i, { ok: false, condition: "timeout" });
+        await flush();
+        i = sendEarlier(ctx);
+        ctx.t.resolveIq(i, { ok: false, condition: "item-not-found" });
+        await flush();
+        const logged = spies.flatMap((s) => s.mock.calls.flat().map(String)).join("\n");
+        expect(logged).not.toContain("secret earlier body");
+        expect(logged).not.toContain(ROOM);
+      } finally {
+        for (const s of spies) s.mockRestore();
+      }
+    });
   });
 });

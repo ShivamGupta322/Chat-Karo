@@ -21,9 +21,9 @@ Learned in Phase 1 (carry into Phase 2):
 
 ## Phase 2 — Web client foundation
 - [x] Vite + React + TS + Tailwind scaffold, ESLint, Vitest (slice 2a)
-- [ ] `xmpp/` module: connect, reconnect with backoff, join/leave MUC, send/receive groupchat
+- [x] `xmpp/` module: connect, reconnect with backoff, join/leave MUC, send/receive groupchat
       (2a done: connect, join/leave, send/receive, nick-conflict retry, connection-lost; 2b-1 done: reconnect with
-      backoff, keepalive, liveness probe; 2b-2a done: room history from MAM; 2b-2b next: "Load earlier messages")
+      backoff, keepalive, liveness probe; 2b-2a done: room history from MAM; 2b-2b done: "Load earlier messages")
 - [x] Chat page: MessageList, Composer, OccupantList (slice 2a)
 - [x] Branding & UI polish: product name "Nearby", design tokens, dark mode, chat bubbles, plain-language UI (slice 2a+, ADR-009)
 - [ ] `geo/useLocation` with permission/error states; dev-mode map location picker

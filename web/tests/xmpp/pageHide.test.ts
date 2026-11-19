@@ -14,6 +14,7 @@ function fakeClient(state: ConnectionState): { client: XmppClient; disconnect: (
     subscribe: vi.fn(() => () => undefined),
     wake: vi.fn(),
     retryHistory: vi.fn(),
+    loadEarlier: vi.fn(),
   };
   return { client, disconnect };
 }

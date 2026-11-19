@@ -12,8 +12,8 @@ export interface MamQuery {
   queryId: string;
   startIso: string;
   max: number;
-  /** 2b-2b adds { before: string } */
-  page: { before: true } | { after: string };
+  /** before: true = newest page; before: id = page ending just before id; after: id = page starting just after id */
+  page: { before: true } | { before: string } | { after: string };
 }
 
 export interface MamItem {
@@ -37,12 +37,14 @@ function bareOf(jid: string): { bare: string; resource: string | null } {
 }
 
 export function buildMamQuery(q: MamQuery): Element {
-  const rsm = [xmlEl('max', { xmlns: NS_RSM }, [String(q.max)])];
-  rsm.push(
-    'before' in q.page
-      ? xmlEl('before', { xmlns: NS_RSM })
-      : xmlEl('after', { xmlns: NS_RSM }, [q.page.after]),
-  );
+  const rsm = [xmlEl('max', {}, [String(q.max)])];
+  if ('after' in q.page) {
+    rsm.push(xmlEl('after', {}, [q.page.after]));
+  } else if (q.page.before === true) {
+    rsm.push(xmlEl('before'));
+  } else {
+    rsm.push(xmlEl('before', {}, [q.page.before]));
+  }
   return xmlEl('iq', { type: 'set', to: q.roomJid, id: q.iqId }, [
     xmlEl('query', { xmlns: NS_MAM, queryid: q.queryId }, [
       xmlEl('x', { xmlns: NS_DATA, type: 'submit' }, [

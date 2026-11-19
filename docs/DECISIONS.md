@@ -178,7 +178,8 @@ to the login form, lost their room and left ghost occupants holding their nickna
   That's acceptable load, but the countdown can mislead.
 
 ## ADR-011 — Room history via MAM
-**Status:** Accepted (Phase 2, slice 2b-2a, 2026-11-18). Amends ADR-010.
+**Status:** Accepted (Phase 2, slice 2b-2a, 2026-11-18). Amends ADR-010. **Extended by ADR-012**, which also corrects
+this ADR's catch-up and initial-load live evidence.
 **Context / root cause (MongooseIM 6.2.1):**
 - `mod_muc_room:broadcast_room_packet` passes `timestamp => Activity#activity.message_time` to the MAM archive hook.
 - `store_user_activity` only keeps the sender's activity record when a MUC rate limit is configured (non-zero
@@ -245,6 +246,13 @@ to the login form, lost their room and left ghost occupants holding their nickna
 - **Catch-up:** alice's socket closed, then 3 messages sent 12 ms later → the rejoin sent one
   `<after>CO4G5NLBN081</after>` query. All 3 arrived only via MAM and rendered exactly once, in order. They were sent
   ~1.2 s before the query, inside the old async writer's window.
+  - **Correction (found in slice 2b-2b):** this evidence did not actually exercise `<after>`, `<before/>` or `<max>`.
+    The 2b-2a `buildMamQuery` gave the RSM children their own `xmlns` attribute (a coder deviation, "RSM children
+    carry explicit xmlns", which was wrong), and MongooseIM 6.2.1 ignores RSM children that carry attributes.
+    - So the server returned the oldest page from the window start every time, and de-dupe plus < 50 messages in
+      the room hid it.
+    - The initial load likewise showed the oldest ≤ 50 messages, not the newest.
+    - The fix and the re-verified live evidence are recorded in ADR-012.
 - **Restart:** after `docker compose restart mongooseim` the app reconnected and rejoined within 20 s. After signing
   in again, 6 messages rendered once each with real times and no 1970 stamps.
 - **Failure and retry:** a dropped initial query timed out (15 s) and showed the failure notice. "Try again" sent a
@@ -255,3 +263,113 @@ to the login form, lost their room and left ghost occupants holding their nickna
 - Phase 3 (private rooms, `default_room.public = false`): make sure the mod_mam_muc access rules still let occupants
   query their room.
 - 2b-2b "Load earlier messages" builds on the RSM `first` id and the same throttle and one-in-flight guard.
+
+## ADR-012 — Load earlier messages
+**Status:** Accepted (Phase 2, slice 2b-2b, 2026-11-19). Extends ADR-011.
+**Context:** A joined user can page back through the room's last 24 h (ADR-004), 50 per click. ADR-011's anti-spoof rules,
+the ≥ 1100 ms global throttle and one query per room are unchanged.
+**Decision:**
+1. **Where earlier pages go:** directly before the timeline message whose id is the `<before>` anchor (the client's
+   `firstId`), or at index 0 if it is absent.
+   - This keeps Leave → Join of the same room correct (gap pages land between the old session and the new initial page).
+   - `insertAt` moves up by the inserted count when the insertion index ≤ `insertAt`.
+2. **firstId lifecycle (`TrackedRoom.firstId`, the `<before>` cursor):**
+   - Set by an initial load only while null, to `fin.first ?? buffer[0]?.id` (null if that page is complete).
+   - Replaced by each earlier page; null on complete or `item-not-found`.
+   - Survives suspend/rejoin; never touched by gap pages or live messages.
+   - "Only while null" because a gap `item-not-found` falls back to a new initial page that sits below the pre-drop messages.
+3. **Earlier pages never change `lastSeenId`, `liveSinceHistory` or `initialDone`**, otherwise the next catch-up would
+   start from an old id. Regression-tested.
+4. **`item-not-found` on `<before>firstId</before>` means "nothing earlier"**, not a failure: loaded
+   `{earlier, messages: [], done: true, complete: true}`. Other conditions → `history-failed {earlier}`.
+5. **Complete** = `fin.complete || buffer.length === 0 || nextFirst === null`, for earlier and initial pages. An empty
+   initial page with `complete='false'` now counts as complete, which keeps `canLoadEarlier` consistent with
+   `firstId !== null`.
+6. **Retry:** the button retries itself ("Try again", described by "Couldn't load earlier messages.") with the same
+   `firstId`.
+   - `history.failed` and the recent-history banner stay initial/gap only.
+   - The store tracks `history.earlier: 'idle' | 'loading' | 'failed'`. Never an auto-retry.
+7. **Cap (MAX_TIMELINE = 500):**
+   - An earlier page is never trimmed from either end; only the newest part that fits (`500 − length`) is inserted.
+   - When anything is dropped, or the timeline reaches 500 by any path, `canLoadEarlier` becomes false for that room
+     session (invariant `canLoadEarlier ⇒ length < 500`).
+8. **Visibility:** the button shows only when `joined && canLoadEarlier && !history.loading && !history.failed`. The
+   client also rejects `loadEarlier` while any history query for the room is queued or in flight.
+9. **Divider unchanged:** it stays after the same last history message.
+10. **Layout and a11y:**
+    - The button and its `role="status"` line sit inside the scroll container but outside `role="log"`; the `<ol>` no
+      longer scrolls itself.
+    - While loading: `aria-disabled` (not `disabled`) on the button and `aria-busy` on the log.
+    - When the focused button disappears, focus moves to the log with `preventScroll`.
+    - After a non-final page focus stays on the button, which has scrolled above the viewport (deliberate).
+11. **Scroll preservation keeps the old first row in place, not a scrollHeight delta** (`components/scrollAnchor.ts`,
+    pure `nextScrollTop`).
+    - A snapshot of the first row's key and offsetTop is taken, refreshed at click time. After an earlier load, the
+      change in that row's offsetTop is added to `scrollTop`; for that render this beats stick-to-bottom.
+    - It is robust when an earlier page and a live message arrive in one batched render.
+    - When a final empty or `item-not-found` page removes the button without a prepend, content shifts up by the
+      button's height. The user is at the top, so the browser clamps it.
+12. **No-progress guards:**
+    - Earlier: `nextFirst === cursor.before` → complete, so it can't loop on the same page.
+    - Gap: `fin.last === cursor.after` → done and `complete: true`, with no next page and no "couldn't be loaded" notice.
+13. **Accepted implementation deviations:**
+    - A complete initial page sets `firstId` to null.
+    - The always-present status line reserves its height (`min-h-4`) so a failure doesn't shift rows.
+    - The button's `onBlur` only forgets focus while the button is still in the DOM.
+    - The gap-continue guard is `!done && fin.last !== null`.
+**Root cause found in this slice (RSM children namespace):**
+- The 2b-2a `buildMamQuery` passed `{xmlns: NS_RSM}` to `<max>`, `<before>` and `<after>`. `xmlEl` turns that into a
+  real `xmlns` attribute and `Strophe.serialize` writes attributes verbatim, so the wire carried
+  `<max xmlns="http://jabber.org/protocol/rsm">`.
+- **MongooseIM 6.2.1 ignores RSM children that carry attributes.** A raw-XMPP A/B with otherwise identical queries:
+  bare children → first index 77 of 127; attributed children → first index 0 (cursor ignored).
+- Effect on 2b-2a: the initial load returned the *oldest* ≤ 50 in the window; `<after>` catch-up and `max` were never
+  really exercised. De-dupe and rooms under 50 messages hid it. ADR-011's live evidence is corrected (see its
+  Correction bullet).
+- **Fix:** only `<set>` carries the RSM xmlns; the children are bare and inherit it. Rule (commented on `xmlEl`): pass
+  xmlns only where the namespace changes.
+- **Regression guards (12 of them failed against the old code):**
+  - `tests/xmpp/mam.test.ts`: bare children, exact names, all 3 page variants.
+  - `tests/xmpp/client.test.ts` `expectBareSet`: initial, gap and earlier IQs as sent through the fake transport.
+  - `tests/xmpp/wireShape.test.ts`: no builder repeats its ancestor's xmlns.
+  - `tests/xmpp/strophe/wire.test.ts`: real `Strophe.serialize` bytes. It is the only test importing strophe.js (ESLint
+    override scoped to that folder) and must be carried over if the transport's serializer ever changes, because
+    `XMLSerializer` would emit `xmlns=""` on the bare children.
+- **Process lesson:** wire-level XMPP changes need a live A/B probe or a real-serializer test. DOM-level
+  `namespaceURI` assertions cannot catch attribute-level problems.
+**Live evidence (2026-11-19, MongooseIM 6.2.1, lobby seeded with 120 messages by a raw-XMPP probe; frames captured in the app):**
+- **Probes:**
+  - after the fix, `<max>5</max><before/>` → exactly 5 results, first index 122 of 127
+  - `<before>bogus</before>` and `<before>1G1</before>` (a 1970 id outside the window) → `item-not-found`
+- **2b-2a initial load re-verified:** `<before/>` max 50 → first index 77, count 127; seed 071–120 shown, one divider,
+  button outside `role=log`.
+- **Paging:**
+  - click 1: `<before>` = initial fin first → 50 results, first index 27
+  - click 2: `<before>` = previous fin first → 27 results, `complete='true'`, first index 0
+  - all 127 shown once, ascending, one divider; button gone; focus on the log
+- **Scroll:** click 2 top row 246.4 → 246.7 px; a fresh first click (keyboard) 352 → 352 px. An earlier −106 px reading
+  was a stale manual measurement; the app's click-time snapshot matched the layout.
+- **Keyboard:** one Tab from Leave reaches the button; a rapid double Enter → exactly one query; focus stays on the
+  button after a non-final page and moves to the log after the final page.
+- **Drop during a load:** click then socket close in one tick.
+  - While reconnecting the button was hidden (with the banner).
+  - After the rejoin the catch-up `<after>` ran and the button returned; the lost page did not appear.
+  - The next Enter reused the same `<before>` (first index 40), then `complete='true'` at first index 0.
+  - Final: 190 messages, each once and in order.
+- **2b-2a catch-up re-verified:** `<after>` her last seen id → exactly 3 results, first index 127, `complete='true'`;
+  each shown once, none live.
+- **Multi-page catch-up:**
+  - 60 messages sent while offline → 2 queries, the second `<after>` = the first fin's `last`, sent **1111 ms apart**
+    (throttle observed live)
+  - fins at first index 130 (not complete) then 180 `complete='true'`
+  - all 60 shown once and in order, no notice
+- No `duplicate_key` in the MongooseIM logs.
+**Caveats:**
+- A live message arriving during an earlier load was not verified live (loads finish in ~120 ms; the second test
+  client's background connection kept dropping). Covered by the scrollAnchor unit and jsdom tests.
+- The "Loading…"/`aria-disabled` state was not observable live (~120 ms). Covered by component tests.
+- Screen readers may announce prepended messages once `aria-busy` clears (accepted, same as 2b-2a).
+**Consequences:**
+- Auto-load on scroll, a "start of last 24 h" marker and virtualising the 500 cap are out of scope.
+- The 120 seeded rows stay in the lobby's window until the Phase 4 purge. The legacy 1970 rows remain (delete only with
+  the user's OK).

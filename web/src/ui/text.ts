@@ -108,5 +108,8 @@ export const HISTORY_TEXT = {
   emptyLoading: 'Loading recent messages…',
   failed: "Couldn't load recent messages.",
   retry: 'Try again',
+  loadEarlier: 'Load earlier messages',
+  loadingEarlier: 'Loading earlier messages…',
+  earlierFailed: "Couldn't load earlier messages.",
   gapTruncated: "Some messages from while you were away couldn't be loaded.",
 } as const;

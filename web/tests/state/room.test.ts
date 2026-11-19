@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import {
   MAX_TIMELINE,
   initialRoomState,
+  mergeEarlier,
   mergeHistory,
   reduceRoom,
   type RoomState,
@@ -284,7 +285,9 @@ describe('reduceRoom history', () => {
   });
   const loadedEvt = (
     messages: ChatMessage[],
-    over: Partial<Extract<XmppEvent, { type: 'history-loaded' }>> = {},
+    over: Partial<
+      Extract<XmppEvent, { type: 'history-loaded'; direction: 'initial' | 'gap' }>
+    > = {},
   ): XmppEvent => ({
     type: 'history-loaded',
     roomJid: A,
@@ -303,6 +306,7 @@ describe('reduceRoom history', () => {
       failed: false,
       canLoadEarlier: false,
       insertAt: 0,
+      earlier: 'idle',
     });
   });
 
@@ -458,5 +462,280 @@ describe('reduceRoom history', () => {
     const t = reduceRoom(s, { type: 'connection', state: { status: 'disconnected' } });
     expect(t).toEqual(initialRoomState);
     expect(t.history.canLoadEarlier).toBe(false);
+  });
+});
+
+describe('mergeEarlier', () => {
+  const item = (id: string): TimelineItem => ({ kind: 'message', message: hmsg(id) });
+  const ids = (t: TimelineItem[]): string[] =>
+    t.map((x) => (x.kind === 'message' ? x.message.id : x.id));
+  const many = (prefix: string, n: number): TimelineItem[] =>
+    Array.from({ length: n }, (_, i) => item(`${prefix}${i}`));
+  const batch = (n: number): ChatMessage[] =>
+    Array.from({ length: n }, (_, i) => hmsg(`e${String(i).padStart(2, '0')}`));
+
+  it('inserts directly before the anchor, in order', () => {
+    const r = mergeEarlier([item('x'), item('a'), item('b')], 3, 'a', [hmsg('e1'), hmsg('e2')]);
+    expect(ids(r.timeline)).toEqual(['x', 'e1', 'e2', 'a', 'b']);
+    expect(r.truncated).toBe(false);
+  });
+
+  it('inserts at index 0 when the anchor is absent', () => {
+    const r = mergeEarlier([item('a')], 1, 'gone', [hmsg('e1')]);
+    expect(ids(r.timeline)).toEqual(['e1', 'a']);
+  });
+
+  it('lands between the old session and the new initial page after leave and rejoin', () => {
+    const notice: TimelineItem = { kind: 'notice', id: 'n1', text: 'You left', at: 1 };
+    const timeline = [item('old1'), item('old2'), notice, item('X'), item('Y')];
+    const r = mergeEarlier(timeline, 5, 'X', [hmsg('g1'), hmsg('g2')]);
+    expect(ids(r.timeline)).toEqual(['old1', 'old2', 'n1', 'g1', 'g2', 'X', 'Y']);
+    expect(r.insertAt).toBe(7);
+  });
+
+  it('shifts insertAt by the inserted count when inserting at or below it', () => {
+    const r = mergeEarlier([item('a'), item('b')], 2, 'a', [hmsg('e1'), hmsg('e2'), hmsg('e3')]);
+    expect(r.insertAt).toBe(5);
+    const absent = mergeEarlier([item('a')], 0, 'gone', [hmsg('e1')]);
+    expect(absent.insertAt).toBe(1);
+  });
+
+  it('leaves insertAt alone when the insertion point is above it only if it lies past it', () => {
+    // The anchor sits at index 2, past insertAt 1: the insert does not move it.
+    const r = mergeEarlier([item('a'), item('b'), item('c')], 1, 'c', [hmsg('e1')]);
+    expect(ids(r.timeline)).toEqual(['a', 'b', 'e1', 'c']);
+    expect(r.insertAt).toBe(1);
+  });
+
+  it('de-dupes against the timeline and within the batch; same reference when nothing is fresh', () => {
+    const timeline = [item('a')];
+    const r = mergeEarlier(timeline, 1, 'a', [hmsg('e1'), hmsg('a'), hmsg('e1'), hmsg('e2')]);
+    expect(ids(r.timeline)).toEqual(['e1', 'e2', 'a']);
+    const same = mergeEarlier(timeline, 1, 'a', [hmsg('a')]);
+    expect(same.timeline).toBe(timeline);
+    expect(same.insertAt).toBe(1);
+    expect(same.truncated).toBe(false);
+    expect(mergeEarlier(timeline, 1, 'a', []).timeline).toBe(timeline);
+  });
+
+  it('480 + 50 inserts only the newest 20 of the batch, in order, and reports truncated', () => {
+    const timeline = many('t', 480);
+    const r = mergeEarlier(timeline, 480, 't0', batch(50));
+    expect(r.timeline).toHaveLength(MAX_TIMELINE);
+    expect(r.truncated).toBe(true);
+    expect(ids(r.timeline).slice(0, 20)).toEqual(batch(50).slice(30).map((m) => m.id));
+    expect(ids(r.timeline)[20]).toBe('t0');
+  });
+
+  it('499 + 50 inserts exactly one (the newest)', () => {
+    const r = mergeEarlier(many('t', 499), 499, 't0', batch(50));
+    expect(r.timeline).toHaveLength(500);
+    expect(ids(r.timeline)[0]).toBe('e49');
+    expect(r.truncated).toBe(true);
+  });
+
+  it('500 + anything inserts nothing, keeps the reference and reports truncated', () => {
+    const timeline = many('t', MAX_TIMELINE);
+    const r = mergeEarlier(timeline, 500, 't0', batch(5));
+    expect(r.timeline).toBe(timeline);
+    expect(r.insertAt).toBe(500);
+    expect(r.truncated).toBe(true);
+  });
+
+  it('never trims existing items', () => {
+    const timeline = many('t', 480);
+    const r = mergeEarlier(timeline, 480, 't0', batch(50));
+    expect(ids(r.timeline).slice(20)).toEqual(ids(timeline));
+  });
+});
+
+describe('reduceRoom: load earlier', () => {
+  const joinedEvt: XmppEvent = { type: 'room-joined', roomJid: A, nick: 'alice', created: false };
+  const earlierLoading: XmppEvent = { type: 'history-loading', roomJid: A, direction: 'earlier' };
+  const earlierFailed: XmppEvent = {
+    type: 'history-failed',
+    roomJid: A,
+    direction: 'earlier',
+    condition: 'timeout',
+  };
+  const earlierLoaded = (
+    messages: ChatMessage[],
+    over: { complete?: boolean; anchorId?: string } = {},
+  ): XmppEvent => ({
+    type: 'history-loaded',
+    roomJid: A,
+    direction: 'earlier',
+    anchorId: over.anchorId ?? 'H1',
+    messages,
+    done: true,
+    complete: over.complete ?? false,
+  });
+  const ids = (s: RoomState): string[] =>
+    s.timeline.map((t) => (t.kind === 'message' ? t.message.id : `notice:${t.text}`));
+  const stateWith = (n: number, canLoadEarlier = true): RoomState => ({
+    ...initialRoomState,
+    roomJid: A,
+    nick: 'alice',
+    status: 'joined',
+    timeline: Array.from({ length: n }, (_, i) => ({
+      kind: 'message' as const,
+      message: hmsg(`t${i}`),
+    })),
+    history: { ...initialRoomState.history, canLoadEarlier, insertAt: n },
+  });
+  const page = (n: number): ChatMessage[] =>
+    Array.from({ length: n }, (_, i) => hmsg(`e${String(i).padStart(2, '0')}`));
+  const base = (): RoomState =>
+    run([
+      joining(A),
+      joinedEvt,
+      {
+        type: 'history-loaded',
+        roomJid: A,
+        direction: 'initial',
+        messages: [hmsg('H1'), hmsg('H2')],
+        done: true,
+        complete: false,
+      },
+      msg('L1'),
+    ]);
+
+  it('history-loading earlier sets only earlier:loading (no banner state)', () => {
+    const s = reduceRoom(base(), earlierLoading);
+    expect(s.history.earlier).toBe('loading');
+    expect(s.history.loading).toBe(false);
+    expect(s.history.failed).toBe(false);
+    expect(reduceRoom(s, earlierLoading)).toBe(s);
+  });
+
+  it('history-failed earlier sets only earlier:failed and keeps history.failed false', () => {
+    const s = reduceRoom(reduceRoom(base(), earlierLoading), earlierFailed);
+    expect(s.history.earlier).toBe('failed');
+    expect(s.history.failed).toBe(false);
+    expect(s.history.loading).toBe(false);
+    expect(s.history.canLoadEarlier).toBe(true);
+    expect(reduceRoom(s, earlierFailed)).toBe(s);
+  });
+
+  it('history-loaded earlier lands directly above the anchor and goes idle', () => {
+    const s0 = reduceRoom(base(), earlierLoading);
+    const s = reduceRoom(s0, earlierLoaded([hmsg('E1'), hmsg('E2')], { anchorId: 'H1' }));
+    expect(ids(s)).toEqual(['E1', 'E2', 'H1', 'H2', 'L1']);
+    expect(s.history.earlier).toBe('idle');
+    expect(s.history.canLoadEarlier).toBe(true);
+    const mid = reduceRoom(s0, earlierLoaded([hmsg('M1')], { anchorId: 'H2' }));
+    expect(ids(mid)).toEqual(['H1', 'M1', 'H2', 'L1']);
+  });
+
+  it('canLoadEarlier becomes false when the page is complete', () => {
+    const s = reduceRoom(base(), earlierLoaded([hmsg('E1')], { complete: true }));
+    expect(s.history.canLoadEarlier).toBe(false);
+    expect(s.history.earlier).toBe('idle');
+  });
+
+  it('an empty complete page (nothing earlier) only withdraws the button', () => {
+    const s0 = reduceRoom(base(), earlierLoading);
+    const s = reduceRoom(s0, earlierLoaded([], { complete: true }));
+    expect(s.timeline).toBe(s0.timeline);
+    expect(s.history).toMatchObject({ earlier: 'idle', canLoadEarlier: false });
+  });
+
+  it('insertAt moves up by the inserted count so a later gap still lands after the history', () => {
+    const b = base();
+    const s = reduceRoom(b, earlierLoaded([hmsg('E1'), hmsg('E2')]));
+    expect(s.history.insertAt).toBe(b.history.insertAt + 2);
+  });
+
+  it('a truncated page withdraws the button', () => {
+    const s = reduceRoom(stateWith(480), earlierLoaded(page(50), { anchorId: 't0' }));
+    expect(s.timeline).toHaveLength(MAX_TIMELINE);
+    expect(s.history.canLoadEarlier).toBe(false);
+  });
+
+  it('reaching exactly 500 withdraws the button', () => {
+    const s = reduceRoom(stateWith(450), earlierLoaded(page(50), { anchorId: 't0' }));
+    expect(s.timeline).toHaveLength(MAX_TIMELINE);
+    expect(s.history.canLoadEarlier).toBe(false);
+  });
+
+  it('499 + a full page keeps one message and withdraws the button', () => {
+    const s = reduceRoom(stateWith(499), earlierLoaded(page(50), { anchorId: 't0' }));
+    expect(s.timeline).toHaveLength(500);
+    expect(s.history.canLoadEarlier).toBe(false);
+  });
+
+  it('an initial load onto a full timeline does not offer earlier', () => {
+    const s = reduceRoom(stateWith(500, false), {
+      type: 'history-loaded',
+      roomJid: A,
+      direction: 'initial',
+      messages: [],
+      done: true,
+      complete: false,
+    });
+    expect(s.history.canLoadEarlier).toBe(false);
+  });
+
+  it('a live append that reaches or trims at the cap withdraws the button and shifts insertAt', () => {
+    let s = stateWith(499);
+    s = reduceRoom(s, msg('n1'));
+    expect(s.timeline).toHaveLength(500);
+    expect(s.history.canLoadEarlier).toBe(false);
+    expect(s.history.insertAt).toBe(499);
+    s = reduceRoom(s, msg('n2'));
+    expect(s.timeline).toHaveLength(500);
+    expect(s.history.insertAt).toBe(498);
+    expect(s.history.canLoadEarlier).toBe(false);
+  });
+
+  it('a gap insert that reaches the cap withdraws the button', () => {
+    const s = reduceRoom(stateWith(495), {
+      type: 'history-loaded',
+      roomJid: A,
+      direction: 'gap',
+      messages: Array.from({ length: 5 }, (_, i) => hmsg(`g${i}`)),
+      done: true,
+      complete: true,
+    });
+    expect(s.timeline).toHaveLength(500);
+    expect(s.history.canLoadEarlier).toBe(false);
+  });
+
+  it('the earlier state resets to idle on suspend, same-room joining and leave', () => {
+    const loadingS = reduceRoom(base(), earlierLoading);
+    const failedS = reduceRoom(loadingS, earlierFailed);
+    for (const s of [loadingS, failedS]) {
+      expect(reduceRoom(s, { type: 'room-suspended', roomJid: A }).history.earlier).toBe('idle');
+      expect(reduceRoom(s, joining(A)).history.earlier).toBe('idle');
+      expect(
+        reduceRoom(s, { type: 'room-left', roomJid: A, reason: 'self' }).history.earlier,
+      ).toBe('idle');
+    }
+    expect(
+      reduceRoom(loadingS, { type: 'room-suspended', roomJid: A }).history.canLoadEarlier,
+    ).toBe(true);
+  });
+
+  it('earlier events for another room return the same reference', () => {
+    const s = base();
+    const events: XmppEvent[] = [
+      { type: 'history-loading', roomJid: B, direction: 'earlier' },
+      { type: 'history-failed', roomJid: B, direction: 'earlier', condition: 'x' },
+      {
+        type: 'history-loaded',
+        roomJid: B,
+        direction: 'earlier',
+        anchorId: 'H1',
+        messages: [hmsg('E1', 1, B)],
+        done: true,
+        complete: false,
+      },
+    ];
+    for (const e of events) expect(reduceRoom(s, e)).toBe(s);
+  });
+
+  it('a live message whose id arrived via an earlier page is ignored', () => {
+    const s = reduceRoom(base(), earlierLoaded([hmsg('E1')]));
+    expect(reduceRoom(s, msg('E1'))).toBe(s);
   });
 });
