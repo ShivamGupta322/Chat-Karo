@@ -150,11 +150,14 @@ web/src/
 ├── xmpp/        client.ts (connect, reconnect w/ backoff), muc.ts (join/leave/send), types.ts,
 │                reconnect.ts (backoff + retry scheduler), lifecycle.ts (online/visible wake), socketClose.ts (close diagnostics),
 │                mam.ts (MAM history query builder + result/fin parsers, pure)
-├── geo/         useLocation.ts (watchPosition + hysteresis), geohash helpers (ngeohash)
+├── geo/         geohash.ts (own encoder, no ngeohash), cell.ts (cellFor; roomJidForCell is TEMPORARY until Phase 3),
+│                useLocation.ts (watchPosition + Permissions API, cell-only state), useArea.ts (device cell + dev spot),
+│                DevLocationPicker.tsx (dev only), index.ts (the only public entry; coordinates never leave geo/;
+│                hysteresis arrives in Phase 4)
 ├── api/         geoService.ts (typed fetch wrapper)
-├── state/       Zustand stores: session, room, messages, presence
+├── state/       Zustand stores: session, room, messages, presence; useAreaRoom.ts (keeps the client in the one desired room)
 ├── components/  MessageList (+ scrollAnchor.ts: keeps scroll position when earlier messages load above),
-│                Composer, OccupantList, RangeSlider, RoomMap, ReportDialog
+│                Composer, OccupantList, AreaPanel, RangeSlider, RoomMap, ReportDialog
 └── pages/       Onboarding, Chat, Map
 ```
 

@@ -147,7 +147,7 @@ export function MessageList({
   return (
     <div
       ref={scrollRef}
-      className="relative h-[55dvh] overflow-y-auto p-3 sm:p-4 md:h-[62dvh]"
+      className="relative h-[55dvh] overflow-y-auto p-3 sm:p-4 md:h-auto md:min-h-0 md:flex-1"
     >
       {hasBlock && (
         <div className="mb-2 flex flex-col items-center gap-1">

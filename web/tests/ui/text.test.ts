@@ -5,9 +5,11 @@ import {
   describeJoinFailure,
   describeMessageError,
   describeSendError,
+  AREA_TEXT,
   type AddressError,
   type SendError,
 } from '../../src/ui/text';
+import { DEV_LOCATION_TEXT } from '../../src/geo/devLocationText';
 import type { ConnectionError, JoinFailure } from '../../src/xmpp';
 
 const JOIN_FAILURES: JoinFailure[] = [
@@ -100,5 +102,26 @@ describe('no protocol jargon in user-facing text', () => {
   it.each(all)('%s', (text) => {
     expect(text).not.toMatch(JARGON);
     expect(text.length).toBeGreaterThan(0);
+  });
+});
+
+describe('area and dev-location text', () => {
+  const JARGON = /geohash|jid|muc|cell|coordinate/i;
+  const strings = (o: Record<string, unknown>): string[] =>
+    Object.values(o).map((v) => (typeof v === 'function' ? (v as (s: string) => string)('u4pruyd') : String(v)));
+
+  it.each(strings(AREA_TEXT))('AREA_TEXT %s has no jargon', (text) => {
+    expect(text).not.toMatch(JARGON);
+    expect(text.length).toBeGreaterThan(0);
+  });
+
+  it.each(strings(DEV_LOCATION_TEXT))('DEV_LOCATION_TEXT %s has no jargon', (text) => {
+    expect(text).not.toMatch(JARGON);
+    expect(text.length).toBeGreaterThan(0);
+  });
+
+  it('formats the area label and joining message', () => {
+    expect(AREA_TEXT.areaLabel('u4pruyd')).toBe('Area u4pruyd');
+    expect(AREA_TEXT.joining('Area u4pruyd')).toBe('Joining Area u4pruyd…');
   });
 });

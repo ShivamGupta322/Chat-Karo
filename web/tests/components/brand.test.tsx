@@ -1,11 +1,18 @@
 import { act, render, screen } from '@testing-library/react';
-import { beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { ConfigError } from '../../src/components/ConfigError';
 import { LogoMark } from '../../src/components/Logo';
 import { Chat } from '../../src/pages/Chat';
 import { initialRoomState, useRoomStore } from '../../src/state/room';
 import { useSessionStore } from '../../src/state/session';
 import { XmppProvider, createXmppClient } from '../../src/xmpp';
+import { CELL_ROOM } from '../fixtures/stanzas';
+import {
+  createFakeGeolocation,
+  createFakePermissions,
+  installGeo,
+  uninstallGeo,
+} from '../helpers/fakeGeolocation';
 import { createFakeTransport } from '../helpers/fakeTransport';
 
 describe('LogoMark', () => {
@@ -41,21 +48,33 @@ describe('Chat page room status', () => {
     useRoomStore.setState({ ...initialRoomState });
   });
 
-  it("reads \"You're in lobby as alice\" and never shows the room address", () => {
+  afterEach(() => {
+    uninstallGeo();
+  });
+
+  it('reads "You\'re in Area u4pruyd as alice" and never shows the room address', async () => {
+    const geo = createFakeGeolocation();
+    installGeo({ geolocation: geo, permissions: createFakePermissions('granted'), secure: true });
     const client = createXmppClient(createFakeTransport(), { mucDomain: 'muc.chaterl.localhost' });
     render(
       <XmppProvider client={client}>
         <Chat mucDomain="muc.chaterl.localhost" />
       </XmppProvider>,
     );
+    await act(async () => {
+      await Promise.resolve();
+    });
+    act(() => {
+      geo.emit(57.64911, 10.40744);
+    });
     act(() => {
       useRoomStore.setState({
-        roomJid: 'lobby@muc.chaterl.localhost',
+        roomJid: CELL_ROOM,
         nick: 'alice',
         status: 'joined',
       });
     });
-    expect(screen.getByText(/You're in/)).toHaveTextContent("You're in lobby as alice");
+    expect(screen.getByText(/You're in/)).toHaveTextContent("You're in Area u4pruyd as alice");
     expect(document.body.textContent).not.toContain('@muc');
   });
 });

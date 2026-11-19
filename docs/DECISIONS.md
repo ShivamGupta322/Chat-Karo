@@ -373,3 +373,94 @@ the ≥ 1100 ms global throttle and one query per room are unchanged.
 - Auto-load on scroll, a "start of last 24 h" marker and virtualising the 500 cap are out of scope.
 - The 120 seeded rows stay in the lobby's window until the Phase 4 purge. The legacy 1970 rows remain (delete only with
   the user's OK).
+
+## ADR-013 — Temporary client-side cell assignment and location states
+**Status:** Accepted (Phase 2, slice 2c-1, 2026-11-19). A **temporary deviation from ADR-005** until Phase 3. Builds on
+ADR-001 (cells), ADR-008 (transport seam, instant rooms) and ADR-009 (tokens, plain-language text).
+**Context:** Phase 2 ends with "client-side geohash, join room, chat" before geo_service exists. ADR-005 says the server
+assigns rooms and coordinates are never stored; this slice has to compute the cell in the browser.
+**Decision:**
+1. **Own encoder, not ngeohash.** `geo/geohash.ts` is a ~60-line pure, encode-only function with a tagged result that
+   never throws. It needs no `@types`, no CommonJS interop and no new dependency, and Phase 4 hysteresis reuses it.
+   Only precision 7 (the "Block" cell, ADR-001) is used: `CellPrecision = 7`.
+2. **Coordinates stay transient inside `web/src/geo/`.**
+   - A position exists only as a local inside the `watchPosition` success callback and is converted with `cellFor`
+     immediately. The dev picker's two input fields are the only other place raw numbers live, and they are cleared once a
+     spot is applied.
+   - Everything else (state, props, stores, stanzas, room names) holds a `Cell` (`{precision, geohash}`) or an area code.
+   - Guards: `geo/index.ts` is the only public entry; ESLint bans deep `geo/*` imports from outside `geo/`, bans any geo
+     import from `src/xmpp/**` (including the Strophe adapter), and sets `no-console` with no allow list inside `src/geo/**`.
+     Note: a bare `'error'` would inherit the base `allow: ['warn','error']`, so the geo block passes explicit empty options.
+   - Never stored, logged or put in an error object (`GeolocationPositionError.message` is never read).
+3. **When the room changes:** only on the first device fix, on a dev spot in a different cell, on an explicit
+   "Switch to my new area", on "Use my real location" (back to the device cell), or when location is lost (leave the
+   room). Later device fixes only raise a "You seem to have moved" prompt. They never switch rooms on their own
+   (hysteresis and auto-switching are Phase 4).
+4. **Room controller (`state/useAreaRoom.ts`)** reconciles the desired room (or none) with the client:
+   - leave the current room if it is active (joining, joined, reconnecting) and differs from the desired one, then join
+     the desired room once connected;
+   - a switch while reconnecting leaves the old room with no stanza (it is untracked, so it is not rejoined) and the new
+     room is joined once on `connected`;
+   - the same room is never touched: the client rejoins suspended rooms itself, and a failed or left room waits for the
+     user's "Join again" (no automatic retry);
+   - the effect re-reads the stores, so StrictMode and quick re-renders cannot join twice.
+   - The page never shows another room's data. Until the room store's `roomJid` equals the desired room (`current`), the
+     timeline and occupants render empty, history status and "Load earlier" are hidden, and the composer is disabled.
+   The manual room form (`RoomForm`) is removed: a manual toggle would fight a single desired room.
+5. **Geolocation options:** `enableHighAccuracy: false`, `timeout: 20 s`, `maximumAge: 60 s`. A ~150 m cell does not need
+   GPS, but desktop browsers may then give an IP-based position kilometres off (accepted; Phase 3 validates server-side).
+   Permission states use the Permissions API when present (Safari below 16 has none), and an insecure context is
+   checked first because it can expose `geolocation` yet fail with code 1.
+6. **Dev picker:** a keyboard-accessible "Test locations (dev)" panel (three presets plus latitude/longitude), rendered
+   only behind a literal `import.meta.env.DEV`, so the picker, its strings and the presets tree-shake out of production
+   builds (checked by grepping `dist/` for the preset labels, picker strings and preset coordinates; the "Test spot" badge
+   in `AREA_TEXT` ships on purpose). Its strings live in `geo/devLocationText.ts` so the "no coordinate words outside
+   geo/" grep stays clean. This is a deliberate, narrow exception to ADR-009 (UI text in `ui/text.ts`); every other
+   string, including `AREA_TEXT`, stays in `ui/text.ts`. The Leaflet map picker is slice 2c-2.
+7. **Layout carry-forward:** on md and wider the page is viewport-height (`md:h-dvh`), `<main>` is a grid with
+   `md:grid-rows-[minmax(0,1fr)]` (needed so the row has a definite height), and the message list is the flex-1 scroll
+   container inside the card. The scroll owner and scrollAnchor are unchanged; below md the flow layout is kept.
+8. **Accepted implementation deviations:**
+   - `useArea` adjusts `committed` during render (no extra effect).
+   - The dev picker accepts plain decimals only and clears its fields after applying.
+   - "Join again" sits in the status line.
+   - A failed or left current room shows an empty message list (the status line explains).
+**Known leaks (dev only, accepted until Phase 3):**
+- Anyone can join any `g7_` room: there is no client-side spoofing control.
+- `default_room.public = true` lists active cell rooms through disco, which reveals which cells are active.
+- `persistent = true` keeps every visited cell room in PostgreSQL.
+- The area code on screen shows up in screenshots and GIFs.
+- Being in a cell room tells co-occupants your ~150 m cell. That is the product, but it is worth saying plainly.
+- In 2c-2, map tile requests will reveal the viewed area.
+**Consequences:**
+- Signing out unmounts the chat, which clears the watch and forgets any dev spot; after signing in again a granted
+  permission starts the watch automatically.
+- Phase 3 deletes `roomJidForCell` and its single call site in `pages/Chat.tsx` when `/api/locate` assigns rooms;
+  `cellFor` and the encoder stay.
+- `ui/addresses.ts` (`toRoomJid`, `roomLabel`) and the room branch of `describeAddressError` are now unused by the UI and
+  are Phase 3 cleanup candidates.
+**Live evidence (2026-11-19, `npm run dev`, MongooseIM 6.2.1):**
+- **Denied state (AC14):** the browser pane had geolocation blocked → the denied text plus "Or choose a test location
+  below.", a "Try location again" button and the "Test locations (dev)" panel; composer disabled; no join presence sent.
+- **Keyboard only:** "Try location again" → Tab → summary (Enter opens) → Tab → "Test spot A" → Enter → exactly one
+  `<presence to="g7_u4pruyd@muc.chaterl.localhost/alice">` with `<history maxstanzas="0"/>`, one MAM query to the same
+  room, "You're in Area u4pruyd as alice", "No messages yet. Say hello!".
+- **Two people, one area, then moving (AC13):**
+  - alice and bob on spot A → both in `g7_u4pruyd`, "People here · 2", messages delivered both ways.
+  - bob → spot B → `g7_u4pruye`, empty log, "People here · 1"; alice saw "bob left".
+  - bob → spot A again → both earlier messages back from the archive above "Earlier messages ↑", People · 2.
+- **Privacy (AC8):**
+  - All 33 WebSocket frames in alice's tab contained no coordinate values (57.6…, 10.40…, 51.507…, -0.127…) and none of
+    lat/lon/lng/latitude/longitude/coord(s).
+  - Only `g7_u4pruyd` was joined; localStorage and sessionStorage were empty; no URL query or hash.
+- **Layout (AC10):** with 102 messages in `g7_u4pruyd`:
+  - At 1280×800 the page did not scroll (scrollingElement 800/800) and had no horizontal scroll. The message list
+    scrolled internally (4490/234 with the dev panel open) and stayed at the bottom while 100 live messages arrived.
+  - At 360×640 there was no horizontal overflow (360/360).
+- **Production bundle (AC9):** no preset labels, picker strings or preset coordinates in `web/dist`.
+**Caveats:**
+- "Switch to my new area" needs real movement and was not verified live (unit-tested).
+- A switch while reconnecting was not verified live (hook and integration tests).
+- Load-earlier scroll preservation was not re-measured live after the layout change (ADR-012 tests pass; scroll container
+  unchanged).
+- The README demo was not run from a clean checkout.

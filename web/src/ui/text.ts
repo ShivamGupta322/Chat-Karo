@@ -113,3 +113,27 @@ export const HISTORY_TEXT = {
   earlierFailed: "Couldn't load earlier messages.",
   gapTruncated: "Some messages from while you were away couldn't be loaded.",
 } as const;
+
+export const AREA_TEXT = {
+  heading: 'Your area',
+  areaLabel: (code: string): string => `Area ${code}`,
+  testSpotBadge: 'Test spot',
+  checking: 'Checking location access…',
+  idle: 'Nearby uses your location to put you in a chat with people around you. Your exact location is never shared or stored.',
+  share: 'Share my location',
+  requesting: 'Finding your location… Your browser may ask for permission.',
+  denied:
+    "Location is off for this site. If you dismissed the prompt, try again. If you blocked it, allow location in your browser's site settings, then try again.",
+  deniedDevHint: 'Or choose a test location below.',
+  unavailable: "We couldn't find your location. Check that location services are on, then try again.",
+  timeout: 'Finding your location took too long.',
+  unsupported: "This browser can't share your location, so we can't find people nearby.",
+  insecure: 'Location only works on a secure (https) page.',
+  tryAgain: 'Try location again',
+  moved: 'You seem to have moved.',
+  switchArea: 'Switch to my new area',
+  joining: (label: string): string => `Joining ${label}…`,
+  rejoin: 'Join again',
+  emptyNoArea: 'Share your location to chat with people nearby.',
+  emptyJoining: 'Getting your area chat ready…',
+} as const;

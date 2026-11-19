@@ -27,7 +27,9 @@ Learned in Phase 1 (carry into Phase 2):
 - [x] Chat page: MessageList, Composer, OccupantList (slice 2a)
 - [x] Branding & UI polish: product name "Nearby", design tokens, dark mode, chat bubbles, plain-language UI (slice 2a+, ADR-009)
 - [ ] `geo/useLocation` with permission/error states; dev-mode map location picker
-- **Demo:** client-side geohash → join room → chat (temporary, before geo_service)
+      (2c-1 done: location states, own geohash encoder, keyboard dev picker, temporary client-side area room, ADR-013;
+      **2c-2: Leaflet map picker** still to do)
+- [x] **Demo:** client-side geohash → join room → chat (temporary, before geo_service). Verified live 2026-11-19 (ADR-013).
 
 Carry-forward for the next slices (from the 2a/2a+ reviews):
 - **2b (RESOLVED in 2b-1, except the AC14 diagnosis pending a real background drop):** sessions drop while the tab is in the background ("Connection lost"). Every observed drop happened while the
@@ -47,7 +49,7 @@ Carry-forward for the next slices (from the 2a/2a+ reviews):
   - After a restart, new messages collide with existing ids (`archive_muc_single_message_failed reason=duplicate_key`) and are silently dropped.
   - The container clock is correct.
   - Also confirmed: `urn:xmpp:mam:2` is supported; `result@id` uses the live stanza-id format; a bogus `<after>` gives `item-not-found`.
-- **2c:** once the dev room form is gone, make the chat card fill the remaining height (`flex-1 min-h-0`), so the
+- **2c (RESOLVED in 2c-1):** once the dev room form is gone, make the chat card fill the remaining height (`flex-1 min-h-0`), so the
   desktop page stops scrolling vertically.
 
 ## Phase 3 — geo_service

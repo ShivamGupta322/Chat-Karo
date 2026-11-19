@@ -6,12 +6,18 @@ const MUC_USER = 'http://jabber.org/protocol/muc#user';
 const STANZAS = 'urn:ietf:params:xml:ns:xmpp-stanzas';
 
 export const ROOM = 'lobby@muc.chaterl.localhost';
+export const CELL_ROOM = 'g7_u4pruyd@muc.chaterl.localhost';
 
-export function presence(nick: string, codes: string[] = [], type?: string): Element {
+export function presence(
+  nick: string,
+  codes: string[] = [],
+  type?: string,
+  room = ROOM,
+): Element {
   const t = type ? ` type="${type}"` : '';
   const st = codes.map((c) => `<status code="${c}"/>`).join('');
   return parse(
-    `<presence from="${ROOM}/${nick}" to="alice@chaterl.localhost/r"${t}><x xmlns="${MUC_USER}"><item affiliation="member" role="participant"/>${st}</x></presence>`,
+    `<presence from="${room}/${nick}" to="alice@chaterl.localhost/r"${t}><x xmlns="${MUC_USER}"><item affiliation="member" role="participant"/>${st}</x></presence>`,
   );
 }
 
@@ -21,8 +27,14 @@ export function presenceError(condition: string, room = ROOM): Element {
   );
 }
 
-export function groupchat(nick: string | null, body: string, extra = '', id = 'm1'): Element {
-  const from = nick === null ? ROOM : `${ROOM}/${nick}`;
+export function groupchat(
+  nick: string | null,
+  body: string,
+  extra = '',
+  id = 'm1',
+  room = ROOM,
+): Element {
+  const from = nick === null ? room : `${room}/${nick}`;
   return parse(
     `<message from="${from}" type="groupchat" id="${id}"><body>${body}</body>${extra}</message>`,
   );

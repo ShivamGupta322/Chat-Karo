@@ -288,6 +288,24 @@ describe("joining", () => {
     });
   });
 
+  it("creates a new cell room through the instant-room path (201 -> config IQ -> joined)", async () => {
+    const cellRoom = `g7_u4pruyd@${MUC}`;
+    const ctx = setup();
+    connect(ctx);
+    ctx.client.joinRoom(cellRoom, "alice");
+    ctx.t.pushStanza(presence("alice", ["110", "201"], undefined, cellRoom));
+    expect(ctx.t.iqs).toHaveLength(1);
+    expect(ctx.t.iqs[0]?.getAttribute("to")).toBe(cellRoom);
+    ctx.t.resolveIq(0, { ok: true, stanza: parse('<iq type="result"/>') });
+    await vi.advanceTimersByTimeAsync(0);
+    expect(ctx.events.find((e) => e.type === "room-joined")).toEqual({
+      type: "room-joined",
+      roomJid: cellRoom,
+      nick: "alice",
+      created: true,
+    });
+  });
+
   it("real MongooseIM 201 frame sends one owner IQ; room-joined only after the result", async () => {
     const ctx = setup();
     connect(ctx);
