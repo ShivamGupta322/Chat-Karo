@@ -21,6 +21,7 @@ dispatch() ->
     cowboy_router:compile([
         {'_', [
             {"/api/health", geo_http_health, []},
+            {"/api/ready", geo_http_ready, []},
             {'_', geo_http_not_found, []}
         ]}
     ]).

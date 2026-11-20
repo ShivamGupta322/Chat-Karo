@@ -56,7 +56,8 @@ Carry-forward for the next slices (from the 2a/2a+ reviews):
 - [x] rebar3 app, supervision tree, sys.config, Dockerfile (slice 3a, ADR-015)
 - [x] `geohash` module with EUnit + PropEr tests (encode/decode round-trip, neighbours) (slice 3a)
 - [ ] Cowboy: `/api/health`, `/api/session`, `/api/locate` (3a done: `/api/health`)
-- [ ] MongoDB pool + `geo_store`; `init-indexes.js`
+- [x] MongoDB pool + `geo_store`; `init-indexes.js` (slice 3b, ADR-016: supervised driver topology, `/api/ready`, rooms upsert)
+- [ ] Slice 3b.1: reap leaked Mongo heartbeat connections on a hung server (ADR-016 quirk 10); before Phase 6 or Atlas use
 - [ ] MongooseIM admin API integration: register users
 - [ ] Lock down MUC: `default_room.public = false` (a public disco listing of geohash rooms would reveal
       which cells are active, a location leak) and restrict room creation to geo_service/admin

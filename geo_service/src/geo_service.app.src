@@ -1,9 +1,17 @@
 {application, geo_service, [
     {description, "Nearby geo service: location to geohash cell to chat room"},
     {vsn, "0.1.0"},
-    {registered, [geo_service_sup]},
+    {registered, [geo_service_sup, geo_mongo_sup, geo_mongo_topology, geo_mongo_probe, mc_pool_sup]},
     {mod, {geo_service_app, []}},
-    {applications, [kernel, stdlib, ranch, cowboy]},
-    {env, []},
+    {applications, [kernel, stdlib, crypto, public_key, ssl, ranch, cowboy, bson, poolboy, pbkdf2]},
+    %% The driver is loaded and shipped in the release, but never started: its own supervision
+    %% tree (mc_super_sup) is replaced by geo_mongo_sup. See ADR-016 quirk 9.
+    {included_applications, [mongodb]},
+    {env, [
+        %% Read by the mongodb driver via application:get_env/1 in the CALLING process's
+        %% application; the default is infinity (a hung Mongo would block callers forever).
+        %% Not host/port/secret.
+        {mc_worker_call_timeout, 5000}
+    ]},
     {modules, []}
 ]}.

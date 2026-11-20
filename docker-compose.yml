@@ -77,11 +77,24 @@ services:
     environment:
       GEO_HTTP_IP: "0.0.0.0"          # inside the container; the host side is 127.0.0.1 below
       GEO_HTTP_PORT: ${GEO_HTTP_PORT:-8080}
+      MONGO_HOSTS: ${MONGO_HOSTS:-mongo:27017}
+      MONGO_DB: ${MONGO_DB:-chaterl}
+      MONGO_REPLICA_SET: ${MONGO_REPLICA_SET:-}
+      MONGO_USER: ${MONGO_USER:-}
+      MONGO_PASSWORD: ${MONGO_PASSWORD:-}
+      MONGO_AUTH_SOURCE: ${MONGO_AUTH_SOURCE:-}
+      MONGO_TLS: ${MONGO_TLS:-false}
+      MONGO_TLS_CA_FILE: ${MONGO_TLS_CA_FILE:-}
+      MONGO_POOL_SIZE: ${MONGO_POOL_SIZE:-}
+    depends_on:
+      # Dev start ordering only: geo_service itself starts degraded and reconnects when Mongo is late.
+      mongo:
+        condition: service_healthy
     ports:
       # localhost only, like the other services (VITE_API_URL points here)
       - "127.0.0.1:${GEO_HTTP_PORT:-8080}:${GEO_HTTP_PORT:-8080}"
     healthcheck:
-      test: ["CMD-SHELL", "curl -fsS http://127.0.0.1:$${GEO_HTTP_PORT}/api/health > /dev/null || exit 1"]
+      test: ["CMD-SHELL", "curl -fsS http://127.0.0.1:$${GEO_HTTP_PORT}/api/ready > /dev/null || exit 1"]
       interval: 10s
       timeout: 3s
       retries: 10

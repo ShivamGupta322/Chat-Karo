@@ -3,7 +3,16 @@
 [
     {geo_service, [
         {http_ip, "${GEO_HTTP_IP}"},
-        {http_port, "${GEO_HTTP_PORT}"}
+        {http_port, "${GEO_HTTP_PORT}"},
+        {mongo_hosts, "${MONGO_HOSTS}"},
+        {mongo_db, "${MONGO_DB}"},
+        {mongo_replica_set, "${MONGO_REPLICA_SET}"},
+        {mongo_user, "${MONGO_USER}"},
+        {mongo_password, "${MONGO_PASSWORD}"},
+        {mongo_auth_source, "${MONGO_AUTH_SOURCE}"},
+        {mongo_tls, "${MONGO_TLS}"},
+        {mongo_tls_ca_file, "${MONGO_TLS_CA_FILE}"},
+        {mongo_pool_size, "${MONGO_POOL_SIZE}"}
     ]},
     {kernel, [
         {logger_level, info},

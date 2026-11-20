@@ -597,3 +597,128 @@ files, the Dockerfile and config. Health is liveness only; readiness of Mongo is
 - `docker compose stop geo_service` took 3 s (log: `SIGTERM received - shutting down`) and exited with code 0.
 - `MSYS_NO_PATHCONV=1 docker compose exec geo_service /opt/geo_service/bin/geo_service ping` → `pong` (no committed cookie).
 - Round 2 rebuild: still healthy, health 200, `pong`, `/opt/geo_service` still has `erts-16.3.1` (bundled by relx `mode prod`, now stated in the config and above). The 555 MB size is accepted for 3a; a slimmer runtime base is deferred to hardening.
+
+---
+
+## ADR-016 — MongoDB driver, readiness and Atlas-ready config
+**Status:** Accepted
+**Context:** Slice 3b connects geo_service to MongoDB. The hex `mongodb_erlang` 3.4.0 only speaks the legacy opcodes
+that MongoDB 6+ removed (ADR-015), so a supervisor spike tested comtihon/mongodb-erlang master against Mongo 7.0.48 on
+OTP 28.4.2 (OP_MSG).
+**Decision:**
+- **Driver and pins** (all in `rebar.lock`): `mongodb` comtihon/mongodb-erlang master @
+  `b17302e7f4f128cf2113a665a5d300b66829cd5d` (3.6.10, Apache-2.0); transitive `bson` v0.2.4 @
+  `f5a8c7030dd0107d2eed99059bc09c53ebe5e5dd` (Apache-2.0), `poolboy` 1.6.1 (comtihon fork) @
+  `6b5212c4cb20b85e57c9627bb0940c126f4e0766` (ISC), `pbkdf2` @ `5201a735639496fc595061160117e4ec155d73f5` (Apache-2.0;
+  dead code on OTP 24+, its three removed-crypto compile warnings are expected). Forbidden: hex `mongodb_erlang`, the
+  emqx fork, an own OP_MSG client. No `rebar3 upgrade` of the poolboy fork branch without review. `plt_extra_apps` gains
+  `bson` and `poolboy`.
+- **Spike evidence:** connect and ping; update with upsert; find_one; createIndexes (2dsphere, TTL); `$near`;
+  `erlang:timestamp()` dates (ms precision); GeoJSON `[lng, lat]` round trip; 50 concurrent calls on a pool of 3; Mongo
+  down at start gives `{ok, Pid}` and `{error, timeout}` calls; self-recovery after a late Mongo start; a killed topology
+  cleans up its processes and the name can be re-registered; SCRAM with `auth_source` works for SHA-1 users (SHA-256-only
+  users fail); TLS `verify_peer` with a CA file and the https hostname match fun works, an unknown CA or a hostname
+  mismatch is rejected.
+- **Driver quirks and their handling:**
+  1. A failed write returns `{true, #{<<"writeErrors">> := [...]}}`: `geo_mongo:classify_write/1` always checks
+     `writeErrors` and `writeConcernError`.
+  2. The `mongo_api:command/3` spec is wrong for Dialyzer: ping uses `mongoc:transaction/4` with
+     `mc_worker_api:command/2`.
+  3. There is no call timeout by default: `mc_utils:get_timeout/0` reads `mc_worker_call_timeout` from the CALLING
+     process's application, so geo_service's app env sets `{mc_worker_call_timeout, 5000}` (it only applies to processes
+     of this application; CT processes have none, which is fine).
+  4. The password leaks into poolboy/supervisor/mc_server crash reports: the `geo_log_redact` primary filter.
+  5. The driver logs through `error_logger` and may include the command document: only cell data reaches `geo_store`.
+  6. A missing topology raises `exit:{noproc, _}` in the caller: every `geo_mongo` wrapper catches `exit:_` and returns
+     `{error, mongo_unavailable}`.
+  7. `mc_server` and `mc_monitor` processes are still not OTP-supervised by the driver (they stop with the topology,
+     verified): accepted. The driver's service processes (`mongo_id_server`, `mc_worker_pid_info`, the pool supervisor)
+     are no longer started by `mc_super_sup`; they run under `geo_mongo_sup` (see quirk 9).
+  8. SRV works only for a single connection (random host, no TXT): see the Atlas section.
+  9. **Orphan pools after a Mongo outage.** `mc_pool_sup` makes its `worker_pool` child TRANSIENT (intensity
+     1000/3600). When Mongo goes away poolboy cannot start a worker and crashes, and `mc_pool_sup` retries in a tight
+     loop (4 crash reports per retry) while `mc_server` has already dropped that pool and later starts a new one. When
+     Mongo returns, the retried pool is an orphan holding `pool_size` connections: measured +5 connections per outage
+     (a `docker compose pause` of Mongo did the same in round 1: `mc_server`'s `update_unknown` killed the pool with
+     `exit(Pool, kill)`, and the transient spec restarted it as an orphan), and round 1 logged 2873 lines in ~45 s. Handling: `mongodb` is an
+     included application (loaded and in the release, never started, so `mongo_app` and `mc_super_sup` do not run);
+     `geo_mongo_sup` runs the driver's service processes, with `geo_mongo_pool_sup` registered as `mc_pool_sup`
+     (`mc_pool_sup:start_pool/2` finds it by name, `mongoc:connect/3` sees `already_started`) and its pool children
+     TEMPORARY, so `mc_server` alone owns each pool's lifecycle. The driver is not patched.
+  10. **Heartbeat connection leak on a hung server (KNOWN ISSUE, fix in slice 3b.1).** `mc_monitor:check/2` opens a
+     connection per heartbeat (`mc_worker_api:connect/1`, linked to the monitor) and only calls `disconnect` after a
+     successful `hello`. When TCP connects but Mongo does not answer within 5 s (a stalled mongod: `docker pause`,
+     SIGSTOP, disk or VM freeze), `hello` exits, the monitor's `catch _:_` swallows it, and the worker stays alive
+     (hibernating, socket open): the monitor traps exits and ignores that worker. Rate: about one leaked connection per
+     10–11 s of hang; mongod never closes idle client connections, so they persist until Mongo, the topology or
+     geo_service restarts (restarting geo_service clears them). Observed 5 → 6 → 8 → 10 connections over three 20 s
+     pauses. A refused connect (Mongo stopped, most partitions) and server-side closes (Atlas failover/maintenance) do
+     not leak. No data or privacy impact. Fix planned in slice 3b.1 before Phase 6 or any Atlas use: a reaper in
+     `geo_mongo_probe` that disconnects `mc_worker` processes linked to the `mc_monitor` once they are older than 30 s
+     (a live heartbeat check lasts at most ~15 s), with a CT case where the proxy blackholes traffic for 35 s.
+- **Topology placement:** a permanent worker child of `geo_mongo_sup` (`rest_for_one`, intensity 5 / period 10),
+  registered as `geo_mongo_topology` (`geo_mongo:child_spec/1`: `{mongoc, connect, [Seed, TopologyOpts, WorkerOpts]}`).
+  Child order: `mongo_id_server`, `mc_worker_pid_info`, `geo_mongo_pool_sup` (as `mc_pool_sup`), the topology,
+  `geo_mongo_probe`; `geo_service_sup` runs `geo_mongo_sup` then `geo_http`. Pool size comes from `MONGO_POOL_SIZE` (default 5, `max_overflow` 0), `serverSelectionTimeoutMS` 2000.
+- **Liveness vs readiness:** `/api/health` stays pure liveness (200 whatever Mongo does). `/api/ready` reads the
+  `geo_mongo_status` ETS table written by `geo_mongo_probe` (ping every 5 s; a transition is logged once as
+  `mongo_ready` or `mongo_unavailable`, never with a reason). The compose healthcheck uses `/api/ready`: Docker does not
+  restart unhealthy containers, so a Mongo outage cannot cause a crash loop. The app boots degraded when Mongo is down
+  and reconnects by itself; configuration errors, by contrast, fail fast at start (key name only logged).
+  `depends_on: mongo: service_healthy` in compose is dev start ordering only.
+- **Atlas-ready, env only:** Docker Mongo stays the dev and Phase 6 VPS database; Atlas becomes an env-only switch via
+  `MONGO_HOSTS` (host list), `MONGO_REPLICA_SET`, `MONGO_USER`/`MONGO_PASSWORD`, `MONGO_AUTH_SOURCE`, `MONGO_TLS`,
+  `MONGO_TLS_CA_FILE`. Limits: SCRAM-SHA-1 only (a SHA-256-only user fails), no `mongodb+srv://` (the SRV/TXT records
+  must be resolved by hand into a host list), and replica-set mode was not verified against a real replica set. Checklist
+  for an Atlas user: create a user with SCRAM-SHA-1 and an alphanumeric password; resolve SRV/TXT into `MONGO_HOSTS`,
+  `MONGO_REPLICA_SET`, `MONGO_AUTH_SOURCE=admin`, `MONGO_TLS=true`; add the VPS IP to Atlas' IP access list; run
+  `init-indexes.js` once; then check `/api/ready` = 200 and that the password is absent from the logs.
+- **Redaction and password charset:** `geo_log_redact:install/1` runs before the supervisor starts and replaces the
+  password (binary or char list, anywhere inside tuples/lists/maps/binaries) with `[REDACTED]`. The password may only
+  contain printable ASCII (32..126), no `"` and no `\`, so that it survives the rendered `sys.config` string unchanged; an alphanumeric
+  password is the safest choice (avoid `$` too, since compose and shells expand it).
+- **No code-created indexes:** `infra/mongo/init-indexes.js` is the single source; the code only relies on `_id`,
+  `center_2dsphere` and `lastActiveAt_ttl` (`geo_mongo_SUITE` has a drift guard on the script). Atlas needs a one-time
+  manual run.
+- **Privacy:** `geo_store` has no latitude/longitude parameters; a rooms document has exactly the keys `_id`,
+  `precision`, `geohash`, `center` (the cell centre, not a user position), `createdAt`, `lastActiveAt`.
+
+**Consequences:** the first geo_service module that talks to a database; the Docker image needs `ca-certificates` for TLS;
+a topology crash loop would stop the application (supervisor intensity 5/10), which the spike never triggered.
+Log noise while Mongo is down: the driver's own reports are not rate-limited (round 1 measured thousands of lines before
+quirk 9 was fixed); with temporary pool children the outage log is bounded (checked by `proxy_outage_no_leak_no_flood`,
+at most 40 events in the down window), plus one `mongo_unavailable` / `mongo_ready` line per transition.
+Known issue: a hung (not stopped) Mongo leaks one heartbeat connection per ~10 s of hang until a restart (quirk 10);
+slice 3b.1 fixes it before Phase 6 or any Atlas use.
+
+### Live evidence
+**2026-11-20, Docker Desktop on Windows, round 1:**
+- `docker compose build geo_service` succeeded; `/etc/ssl/certs/ca-certificates.crt` exists in the container; all four
+  services healthy. `/api/ready` → 200 `{"status":"ready","mongo":"up"}`, `/api/health` → 200, POST `/api/ready` → 405.
+- Indexes: `rooms` has `_id_, center_2dsphere, lastActiveAt_ttl`. Re-running
+  `MSYS_NO_PATHCONV=1 docker compose exec -T mongo mongosh --quiet chaterl /docker-entrypoint-initdb.d/init-indexes.js`
+  exited 0 ("indexes ensured"). Without `-T` the exec hangs from a non-interactive shell.
+- `docker compose stop mongo`: ready → 503 after 7 s, health 200 (0.22 s); `start mongo` → ready 200 after 38 s; geo_service
+  RestartCount stayed 0; exactly one `mongo_unavailable` and one `mongo_ready` event. Round 1 also produced 2873 log lines
+  in ~45 s from driver pool restart loops, and the supervisor measured +5 Mongo connections per outage (orphan pools);
+  fixed in round 2 (quirk 9).
+- Boot with Mongo down (`up -d --no-deps --force-recreate geo_service`): running, health 200, ready 503 (71 log lines in
+  15 s); `start mongo` → ready 200 after 14 s, no restart.
+- `docker compose pause mongo`: ready → 503 after 10 s; health stayed 200 with a max of 0.28 s; 4 log lines while paused;
+  `unpause` → ready 200 after 2 s, no restart (Mongo itself reports unhealthy for a while after unpause, as expected).
+- Bad config: `MONGO_HOSTS=` → exit 1, `{bad_config,mongo_hosts}`; `MONGO_USER=x` with no password → exit 1,
+  `{bad_config,mongo_password}`.
+- Secret redaction: a container run with `MONGO_USER=ghost MONGO_PASSWORD=live-sentinel-9z9z` for 25 s logged the sentinel
+  0 times and `[REDACTED]` 3 times; ready 503 inside.
+
+**Round 2 (2026-11-21, rebuilt image, container recreated):**
+- Start: ready 200 after 11 s; exactly 5 Mongo connections from the geo_service IP (`db.currentOp(true)` filtered by client).
+- Two `docker compose stop mongo` / `start mongo` outages in a row: ready 503 after 4 s / 1 s, back to 200 after 14 s / 8 s;
+  20 and 17 geo_service log lines per outage, 0 `start_error` lines; 5 connections after each recovery; RestartCount 0.
+- Boot with Mongo down: running, health 200, ready 503; start mongo → ready 200 after 9 s; 5 connections.
+- Redaction: `MONGO_USER=ghost MONGO_PASSWORD=live-sentinel-9z9z` for 25 s → sentinel 0, `[REDACTED]` 3, ready 503.
+  `MONGO_HOSTS=` → `{bad_config,mongo_hosts}`.
+- `docker compose pause mongo`: ready 503 after 5 s, health 200 (0.34 s), ready 200 4 s after unpause, 9 log lines, no
+  restart. **But each pause leaves extra connections:** 5 → 6 → 8 → 10 over three pauses (stable for 2 min after each).
+  In the node: 1 `mc_monitor`, 1 `poolboy`, 10 `mc_worker`. 5 are pool workers; 5 are hibernating workers linked only to
+  the `mc_monitor` (heartbeat connections it opened after timed-out checks and never closed). See quirk 10.

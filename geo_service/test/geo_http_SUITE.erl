@@ -8,6 +8,7 @@
     health_head/1,
     health_method_not_allowed/1,
     unknown_paths_404/1,
+    ready_unavailable_without_mongo/1,
     listener_supervised_and_restarts/1,
     bad_config_fails_start_without_leaking_value/1
 ]).
@@ -25,12 +26,15 @@ groups() ->
             health_head,
             health_method_not_allowed,
             unknown_paths_404,
+            ready_unavailable_without_mongo,
             listener_supervised_and_restarts
         ]}
     ].
 
 init_per_suite(Config) ->
     {ok, _} = application:ensure_all_started(inets),
+    %% Nothing listens on port 1: this suite runs without MongoDB (readiness is 503).
+    set_mongo("127.0.0.1:1", ""),
     Config.
 
 end_per_suite(_Config) ->
@@ -78,7 +82,36 @@ unknown_paths_404(_Config) ->
         ["/nope", "/api/health/x"]
     ).
 
+ready_unavailable_without_mongo(_Config) ->
+    Expected = "{\"status\":\"unavailable\",\"mongo\":\"down\"}",
+    {ok, {{_, 503, _}, Headers, Expected}} = request(get, "/api/ready"),
+    "application/json" = proplists:get_value("content-type", Headers),
+    "no-store" = proplists:get_value("cache-control", Headers),
+    {ok, {{_, 503, _}, _, ""}} = request(head, "/api/ready"),
+    {ok, {{_, 405, _}, PostHeaders, PostBody}} = request(post, "/api/ready"),
+    "GET, HEAD" = proplists:get_value("allow", PostHeaders),
+    #{<<"error">> := <<"method_not_allowed">>} = json:decode(list_to_binary(PostBody)),
+    %% Liveness is independent of Mongo.
+    {ok, {{_, 200, _}, _, "{\"status\":\"ok\"}"}} = request(get, "/api/health").
+
 listener_supervised_and_restarts(_Config) ->
+    Ids = [Id || {Id, _, _, _} <- supervisor:which_children(geo_service_sup)],
+    true = lists:member(geo_mongo_sup, Ids),
+    true = lists:member({ranch_embedded_sup, geo_http}, Ids) orelse lists:member(geo_http, Ids),
+    %% The driver is included, never started: its processes live under geo_mongo_sup.
+    false = lists:keymember(mongodb, 1, application:which_applications()),
+    lists:foreach(
+        fun(Name) -> true = is_pid(whereis(Name)) end,
+        [mc_pool_sup, mongo_id_server, mc_worker_pid_info, geo_mongo_topology, geo_mongo_probe]
+    ),
+    MongoIds = [Id || {Id, _, _, _} <- supervisor:which_children(geo_mongo_sup)],
+    [
+        mongo_id_server,
+        mc_worker_pid_info,
+        geo_mongo_pool_sup,
+        geo_mongo,
+        geo_mongo_probe
+    ] = lists:reverse(MongoIds),
     Pid = listener_pid(),
     true = is_pid(Pid),
     true = erlang:is_process_alive(Pid),
@@ -110,7 +143,13 @@ bad_config_fails_start_without_leaking_value(_Config) ->
         end,
         Events
     ),
-    false = contains(Reason, ?SENTINEL).
+    false = contains(Reason, ?SENTINEL),
+    %% An invalid mongo setting is also a fail-fast bad_config naming the key.
+    set_listen("127.0.0.1", "0"),
+    set_mongo("", ""),
+    {error, Reason2} = application:start(geo_service),
+    true = contains(Reason2, {bad_config, mongo_hosts}),
+    set_mongo("127.0.0.1:1", "").
 
 %%% logger handler -----------------------------------------------------------------------
 
@@ -123,6 +162,22 @@ log(Event, #{config := #{test_pid := Pid}}) ->
 set_listen(Ip, Port) ->
     application:set_env(geo_service, http_ip, Ip),
     application:set_env(geo_service, http_port, Port).
+
+set_mongo(Hosts, Password) ->
+    lists:foreach(
+        fun({K, V}) -> application:set_env(geo_service, K, V) end,
+        [
+            {mongo_hosts, Hosts},
+            {mongo_db, "geo_ct"},
+            {mongo_replica_set, ""},
+            {mongo_user, ""},
+            {mongo_password, Password},
+            {mongo_auth_source, ""},
+            {mongo_tls, ""},
+            {mongo_tls_ca_file, ""},
+            {mongo_pool_size, ""}
+        ]
+    ).
 
 request(Method, Path) ->
     Port = ranch:get_port(geo_http),

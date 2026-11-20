@@ -78,7 +78,12 @@ Room JIDs are deterministic from the cell so any node can compute them; no looku
 
 ```
 geo_service_sup (one_for_one)
-├── geo_mongo_pool            # mongodb-erlang connection pool
+├── geo_mongo_sup (rest_for_one)   # everything the mongodb driver needs; the driver app itself is never started
+│   ├── mongo_id_server       # driver ETS/id owner
+│   ├── mc_worker_pid_info    # driver ETS owner
+│   ├── mc_pool_sup           # = geo_mongo_pool_sup: simple_one_for_one, TEMPORARY pool children (ADR-016 quirk 9)
+│   ├── geo_mongo             # mongodb-erlang topology (registered geo_mongo_topology)
+│   └── geo_mongo_probe       # pings Mongo every 5 s, publishes up/down in ETS (readiness)
 ├── geo_rate                  # owns ETS table: user → {last_cell_centre, last_ts, tokens}
 ├── geo_room_sup (simple_one_for_one)
 │   └── geo_room  ×N          # one gen_server per active cell; idle timeout → stop
@@ -86,12 +91,17 @@ geo_service_sup (one_for_one)
 └── geo_http                  # Cowboy listener (ranch) — handlers are short-lived per request
 ```
 
-**Status (Phase 3a):** only `geo_http` exists under `geo_service_sup` (one_for_one, intensity 5 / period 10); the other
-children arrive in later slices. The listener is embedded with `ranch:child_spec/5` (`cowboy_clear` protocol), so it lives
+**Status (Phase 3b):** `geo_mongo_sup` and `geo_http` exist under `geo_service_sup` (one_for_one, intensity
+5 / period 10, started in that order); `geo_mongo_sup` (rest_for_one, intensity 5 / period 10) holds the driver's service
+processes, the topology and the readiness probe. The `mongodb` driver is an included application (loaded and shipped,
+never started), so its own supervision tree is replaced by ours and pool children are temporary; the other
+`geo_service_sup` children arrive in later slices. Mongo may be down at boot: the app
+still starts (degraded), `/api/ready` answers 503 and the driver reconnects by itself (ADR-016). The listener is embedded with `ranch:child_spec/5` (`cowboy_clear` protocol), so it lives
 under our supervisor and a crash restarts it; `cowboy:start_clear/3` is deliberately not used. JSON is encoded
 with OTP's stdlib `json` (OTP 27+, pinned 28.4.2; see ADR-015). `geo_config` is the only module that reads the application
-environment: `GEO_HTTP_IP` / `GEO_HTTP_PORT` flow in through `config/sys.config.src` and are validated at start. A bad value
-stops the application and logs only the key name.
+environment: `GEO_HTTP_IP` / `GEO_HTTP_PORT` and the `MONGO_*` variables flow in through `config/sys.config.src` and are validated at
+start. A bad value stops the application and logs only the key name. A logger filter (`geo_log_redact`) is installed
+before the supervisor and replaces the Mongo password with `[REDACTED]` in every log event.
 
 `geohash` API (pure; no logging, no processes; matches `web/src/geo/geohash.ts`):
 
@@ -108,18 +118,23 @@ stops the application and logs only the key name.
 | Module | Responsibility |
 |---|---|
 | `geo_service_app` / `geo_service_sup` | Application start, top supervisor |
+| `geo_mongo_sup` | rest_for_one supervisor for the driver's service processes, the topology and the probe |
+| `geo_mongo_pool_sup` | Registered as `mc_pool_sup`; simple_one_for_one with temporary poolboy children (replaces the driver's transient one) |
 | `geohash` | Pure encode/decode/neighbours — fully unit-tested, property-tested |
-| `geo_cell` | Range → precision, cell → room JID, cell centre |
+| `geo_cell` | Pure: range → precision, point → cell, cell ↔ room id, room JID, GeoJSON cell centre |
+| `geo_mongo` | Driver topology child spec, `ready/0`, `ping/0`, `update_one/4`, `find_one/3`, write-result classification |
+| `geo_mongo_probe` | gen_server owning the `geo_mongo_status` ETS table (up/down), probes every 5 s |
+| `geo_log_redact` | Logger primary filter that redacts the Mongo password |
 | `geo_rate` | Token-bucket rate limit + impossible-jump check (ETS) |
 | `geo_room` | Per-cell gen_server: activity tracking, idle shutdown, slow-mode settings |
 | `geo_room_sup` | Starts/stops `geo_room` children on demand |
-| `geo_config` | The only reader of app env; validates `http_ip` / `http_port` |
+| `geo_config` | The only reader of app env; validates `http_ip` / `http_port` and the `mongo_*` keys |
 | `geo_http` | Embedded ranch listener and routes |
 | `geo_http_reply` | JSON replies and security headers |
-| `geo_http_*` | Cowboy handlers: `health`, `not_found`, and later `session`, `locate`, `places`, `report` |
+| `geo_http_*` | Cowboy handlers: `health`, `ready`, `not_found`, and later `session`, `locate`, `places`, `report` |
 | `geo_auth` | JWT issue/verify |
 | `geo_xmpp_admin` | Calls MongooseIM admin API (register user, set room affiliation) |
-| `geo_store` | All MongoDB access (rooms, places, profiles, reports) |
+| `geo_store` | All MongoDB access (rooms, places, profiles, reports); 3b has rooms only: `touch_room/1,2`, `get_room/1`. Takes cells, never coordinates |
 
 ### HTTP API (v1)
 
@@ -130,7 +145,8 @@ stops the application and logs only the key name.
 | GET | `/api/rooms/nearby?cell=…` | → active rooms in neighbouring cells |
 | GET | `/api/places?cell=…` | → named places in/near cell |
 | POST | `/api/report` | `{room_jid, message_id, reason}` → `204` |
-| GET | `/api/health` | → `{status:"ok"}` |
+| GET | `/api/health` | → `{status:"ok"}` (liveness: 200 whatever Mongo's state) |
+| GET | `/api/ready` | → `200 {"status":"ready","mongo":"up"}` or `503 {"status":"unavailable","mongo":"down"}` (readiness; GET/HEAD only; used by the compose healthcheck) |
 
 Errors: `{error: "<code>", message: "<human text>"}` with proper HTTP status.
 
@@ -143,6 +159,8 @@ Errors: `{error: "<code>", message: "<human text>"}` with proper HTTP status.
   placeId: ObjectId | null, slowModeSec: 0,
   createdAt: ISODate, lastActiveAt: ISODate }
 // indexes: center 2dsphere; lastActiveAt TTL (e.g. 7 days idle → removed)
+// Phase 3b writes exactly: _id, precision, geohash, center, createdAt, lastActiveAt. placeId / slowModeSec arrive in
+// Phase 5; readers must treat a missing placeId as null and a missing slowModeSec as 0.
 
 // places — seeded points of interest
 { _id, name: "Central Library", kind: "library",
@@ -197,4 +215,4 @@ leaves old / joins new → incoming stanzas dispatched to message & presence sto
 ## Observability
 
 - Structured logging via OTP `logger` (JSON formatter) in geo_service.
-- `/api/health`; MongooseIM metrics endpoint (Prometheus) if time allows.
+- `/api/health` (liveness) and `/api/ready` (readiness); MongooseIM metrics endpoint (Prometheus) if time allows.

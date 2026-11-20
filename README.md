@@ -48,11 +48,20 @@ Prerequisites: Docker Desktop, Node 20+, Git Bash (on Windows).
 ```bash
 cp .env.example .env          # then replace every "change-me" with a random value
 docker compose up -d          # MongooseIM, PostgreSQL, MongoDB, geo_service — wait until `docker compose ps` shows 4 healthy
-curl http://127.0.0.1:8080/api/health    # geo_service (first start builds the image): {"status":"ok"}
+curl http://127.0.0.1:8080/api/health    # geo_service liveness (first start builds the image): {"status":"ok"}
+curl http://127.0.0.1:8080/api/ready     # readiness, 200 once Mongo answers: {"status":"ready","mongo":"up"}
 # after changing geo_service code, rebuild: plain `up -d` does not rebuild an existing image
 docker compose up -d --build geo_service
 bash infra/mongooseim/dev-seed.sh
 node tools/xmpp-smoke/serve.mjs
+```
+
+geo_service integration tests (`cd geo_service && rebar3 ct`) need the dev MongoDB up on `127.0.0.1:27018`
+(override with `GEO_CT_MONGO_HOSTS`); they only use the database `chaterl_ct`. To (re-)apply the collection indexes to
+a running Mongo (idempotent; needed once on Atlas):
+
+```bash
+MSYS_NO_PATHCONV=1 docker compose exec -T mongo mongosh --quiet chaterl /docker-entrypoint-initdb.d/init-indexes.js
 ```
 
 Open http://localhost:8000/?user=alice in one tab and http://localhost:8000/?user=bob in another, log in

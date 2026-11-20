@@ -1,6 +1,22 @@
 {"1.2.0",
-[{<<"cowboy">>,{pkg,<<"cowboy">>,<<"2.21.0">>},0},
+[{<<"bson">>,
+  {git,"https://github.com/comtihon/bson-erlang.git",
+       {ref,"f5a8c7030dd0107d2eed99059bc09c53ebe5e5dd"}},
+  1},
+ {<<"cowboy">>,{pkg,<<"cowboy">>,<<"2.21.0">>},0},
  {<<"cowlib">>,{pkg,<<"cowlib">>,<<"2.22.0">>},1},
+ {<<"mongodb">>,
+  {git,"https://github.com/comtihon/mongodb-erlang.git",
+       {ref,"b17302e7f4f128cf2113a665a5d300b66829cd5d"}},
+  0},
+ {<<"pbkdf2">>,
+  {git,"https://github.com/comtihon/erlang-pbkdf2.git",
+       {ref,"5201a735639496fc595061160117e4ec155d73f5"}},
+  1},
+ {<<"poolboy">>,
+  {git,"https://github.com/comtihon/poolboy.git",
+       {ref,"6b5212c4cb20b85e57c9627bb0940c126f4e0766"}},
+  1},
  {<<"ranch">>,{pkg,<<"ranch">>,<<"2.4.0">>},1}]}.
 [
 {pkg_hash,[
