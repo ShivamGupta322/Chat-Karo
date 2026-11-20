@@ -57,7 +57,7 @@ Carry-forward for the next slices (from the 2a/2a+ reviews):
 - [x] `geohash` module with EUnit + PropEr tests (encode/decode round-trip, neighbours) (slice 3a)
 - [ ] Cowboy: `/api/health`, `/api/session`, `/api/locate` (3a done: `/api/health`)
 - [x] MongoDB pool + `geo_store`; `init-indexes.js` (slice 3b, ADR-016: supervised driver topology, `/api/ready`, rooms upsert)
-- [ ] Slice 3b.1: reap leaked Mongo heartbeat connections on a hung server (ADR-016 quirk 10); before Phase 6 or Atlas use
+- [x] Slice 3b.1: reap leaked Mongo heartbeat connections on a hung server (ADR-016 quirk 10, verified live 2026-11-21)
 - [ ] MongooseIM admin API integration: register users
 - [ ] Lock down MUC: `default_room.public = false` (a public disco listing of geohash rooms would reveal
       which cells are active, a location leak) and restrict room creation to geo_service/admin

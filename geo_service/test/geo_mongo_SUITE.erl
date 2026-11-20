@@ -18,6 +18,7 @@
     pool_kill_does_not_leak/1,
     degraded_group/1,
     proxy_outage_no_leak_no_flood/1,
+    proxy_blackhole_no_heartbeat_leak/1,
     password_never_logged/1
 ]).
 %% logger handler callback
@@ -32,6 +33,7 @@ all() ->
         {group, live},
         degraded_group,
         proxy_outage_no_leak_no_flood,
+        proxy_blackhole_no_heartbeat_leak,
         password_never_logged
     ].
 
@@ -271,6 +273,62 @@ proxy_outage_no_leak_no_flood(_Config) ->
         restore_live()
     end.
 
+%% Regression for ADR-016 quirk 10: while the server hangs (connections are accepted but nothing
+%% is answered) the driver's heartbeat checks time out and abandon their worker with the socket
+%% open. The probe's reaper must stop them once they are old enough, leaving the pool plus at
+%% most one live heartbeat connection.
+proxy_blackhole_no_heartbeat_leak(_Config) ->
+    PoolSize = 5,
+    {Proxy, Port} = proxy_start(0),
+    try
+        application:stop(geo_service),
+        start_app("127.0.0.1:" ++ integer_to_list(Port), "", ""),
+        wait_ready(20000),
+        ok = proxy_mode(Proxy, blackhole),
+        timer:sleep(35000),
+        Leaked = length(geo_mongo_reaper:candidates()),
+        ct:pal("~b abandoned heartbeat workers after 35 s of blackhole", [Leaked]),
+        true = Leaked >= 1,
+        ok = proxy_mode(Proxy, forward),
+        wait_ready(60000),
+        Start = erlang:monotonic_time(millisecond),
+        {Candidates, Upstream, Children} =
+            wait_no_leak(Proxy, PoolSize, Start + 90000),
+        ct:pal(
+            "converged after ~b s: ~b abandoned workers, ~b live upstream sockets (pool_size ~b), ~b pools",
+            [
+                (erlang:monotonic_time(millisecond) - Start) div 1000,
+                Candidates,
+                Upstream,
+                PoolSize,
+                Children
+            ]
+        ),
+        1 = Children
+    after
+        _ = proxy_stop(Proxy),
+        restore_live()
+    end.
+
+%% Polls every second until the reaper has cleaned up (no candidates, at most the pool plus one
+%% live heartbeat connection upstream); fails with the last observation at the deadline.
+wait_no_leak(Proxy, PoolSize, Deadline) ->
+    Candidates = length(geo_mongo_reaper:candidates()),
+    Upstream = proxy_connections(Proxy),
+    Children = length(supervisor:which_children(mc_pool_sup)),
+    case Candidates =:= 0 andalso Upstream =< PoolSize + 1 of
+        true ->
+            {Candidates, Upstream, Children};
+        false ->
+            case erlang:monotonic_time(millisecond) >= Deadline of
+                true ->
+                    ct:fail({heartbeat_leak_not_reaped, {Candidates, Upstream, Children}});
+                false ->
+                    timer:sleep(1000),
+                    wait_no_leak(Proxy, PoolSize, Deadline)
+            end
+    end.
+
 password_never_logged(_Config) ->
     HandlerId = geo_mongo_SUITE_capture,
     try
@@ -435,44 +493,46 @@ proxy_init(Parent, Port) ->
     ]),
     {ok, ActualPort} = inet:port(Listen),
     Ctl = self(),
-    spawn(fun() -> proxy_accept(Listen, Ctl) end),
+    Mode = ets:new(proxy_mode, [public, set]),
+    true = ets:insert(Mode, {mode, forward}),
+    spawn(fun() -> proxy_accept(Listen, Ctl, Mode) end),
     Parent ! {proxy_up, self(), ActualPort},
-    proxy_loop(Listen, []).
+    proxy_loop(Listen, Mode, []).
 
-proxy_accept(Listen, Ctl) ->
+proxy_accept(Listen, Ctl, Mode) ->
     case gen_tcp:accept(Listen) of
         {ok, Down} ->
             Relay = spawn(fun() ->
                 receive
-                    go -> proxy_relay(Down)
+                    go -> proxy_relay(Down, Mode)
                 end
             end),
             ok = gen_tcp:controlling_process(Down, Relay),
             Ctl ! {relay, Relay},
             Relay ! go,
-            proxy_accept(Listen, Ctl);
+            proxy_accept(Listen, Ctl, Mode);
         {error, _} ->
             ok
     end.
 
-proxy_relay(Down) ->
+proxy_relay(Down, Mode) ->
     {Host, Port} = upstream(),
     case gen_tcp:connect(Host, Port, [binary, {active, true}]) of
         {ok, Up} ->
             ok = inet:setopts(Down, [{active, true}]),
-            proxy_pipe(Down, Up);
+            proxy_pipe(Down, Up, Mode);
         {error, _} ->
             gen_tcp:close(Down)
     end.
 
-proxy_pipe(Down, Up) ->
+proxy_pipe(Down, Up, Mode) ->
     receive
         {tcp, Down, Data} ->
-            _ = gen_tcp:send(Up, Data),
-            proxy_pipe(Down, Up);
+            ok = proxy_forward(Mode, Up, Data),
+            proxy_pipe(Down, Up, Mode);
         {tcp, Up, Data} ->
-            _ = gen_tcp:send(Down, Data),
-            proxy_pipe(Down, Up);
+            ok = proxy_forward(Mode, Down, Data),
+            proxy_pipe(Down, Up, Mode);
         {tcp_closed, _} ->
             gen_tcp:close(Down),
             gen_tcp:close(Up);
@@ -481,13 +541,17 @@ proxy_pipe(Down, Up) ->
             gen_tcp:close(Up)
     end.
 
-proxy_loop(Listen, Relays) ->
+proxy_loop(Listen, Mode, Relays) ->
     receive
         {relay, Relay} ->
-            proxy_loop(Listen, [Relay | Relays]);
+            proxy_loop(Listen, Mode, [Relay | Relays]);
+        {mode, From, NewMode} ->
+            true = ets:insert(Mode, {mode, NewMode}),
+            From ! {proxy_mode_set, self()},
+            proxy_loop(Listen, Mode, Relays);
         {count, From} ->
             From ! {proxy_count, self(), length([R || R <- Relays, is_process_alive(R)])},
-            proxy_loop(Listen, Relays);
+            proxy_loop(Listen, Mode, Relays);
         {stop, From} ->
             gen_tcp:close(Listen),
             lists:foreach(fun(R) -> exit(R, kill) end, Relays),
@@ -516,3 +580,21 @@ proxy_connections(Pid) ->
 upstream() ->
     [Host, PortStr | _] = string:split(hosts(), ":"),
     {Host, list_to_integer(PortStr)}.
+
+%% In blackhole mode connections are still accepted and both sockets of every relay stay open,
+%% but nothing is forwarded in either direction (like a hung mongod).
+proxy_forward(Mode, To, Data) ->
+    case ets:lookup(Mode, mode) of
+        [{mode, forward}] ->
+            _ = gen_tcp:send(To, Data),
+            ok;
+        [{mode, blackhole}] ->
+            ok
+    end.
+
+proxy_mode(Pid, NewMode) ->
+    Pid ! {mode, self(), NewMode},
+    receive
+        {proxy_mode_set, Pid} -> ok
+    after 5000 -> ct:fail(proxy_mode_timeout)
+    end.

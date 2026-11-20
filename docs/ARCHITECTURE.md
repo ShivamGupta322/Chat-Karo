@@ -83,7 +83,7 @@ geo_service_sup (one_for_one)
 │   ├── mc_worker_pid_info    # driver ETS owner
 │   ├── mc_pool_sup           # = geo_mongo_pool_sup: simple_one_for_one, TEMPORARY pool children (ADR-016 quirk 9)
 │   ├── geo_mongo             # mongodb-erlang topology (registered geo_mongo_topology)
-│   └── geo_mongo_probe       # pings Mongo every 5 s, publishes up/down in ETS (readiness)
+│   └── geo_mongo_probe       # pings Mongo every 5 s, publishes up/down in ETS (readiness), reaps abandoned heartbeat connections
 ├── geo_rate                  # owns ETS table: user → {last_cell_centre, last_ts, tokens}
 ├── geo_room_sup (simple_one_for_one)
 │   └── geo_room  ×N          # one gen_server per active cell; idle timeout → stop
@@ -123,7 +123,8 @@ before the supervisor and replaces the Mongo password with `[REDACTED]` in every
 | `geohash` | Pure encode/decode/neighbours — fully unit-tested, property-tested |
 | `geo_cell` | Pure: range → precision, point → cell, cell ↔ room id, room JID, GeoJSON cell centre |
 | `geo_mongo` | Driver topology child spec, `ready/0`, `ping/0`, `update_one/4`, `find_one/3`, write-result classification |
-| `geo_mongo_probe` | gen_server owning the `geo_mongo_status` ETS table (up/down), probes every 5 s |
+| `geo_mongo_probe` | gen_server owning the `geo_mongo_status` ETS table (up/down), probes every 5 s, reaps abandoned heartbeat connections |
+| `geo_mongo_reaper` | Pure: finds the driver monitor's abandoned heartbeat `mc_worker` processes and picks those older than 30 s (ADR-016 quirk 10) |
 | `geo_log_redact` | Logger primary filter that redacts the Mongo password |
 | `geo_rate` | Token-bucket rate limit + impossible-jump check (ETS) |
 | `geo_room` | Per-cell gen_server: activity tracking, idle shutdown, slow-mode settings |

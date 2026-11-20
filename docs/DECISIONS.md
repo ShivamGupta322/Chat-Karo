@@ -645,7 +645,7 @@ OTP 28.4.2 (OP_MSG).
      `geo_mongo_sup` runs the driver's service processes, with `geo_mongo_pool_sup` registered as `mc_pool_sup`
      (`mc_pool_sup:start_pool/2` finds it by name, `mongoc:connect/3` sees `already_started`) and its pool children
      TEMPORARY, so `mc_server` alone owns each pool's lifecycle. The driver is not patched.
-  10. **Heartbeat connection leak on a hung server (KNOWN ISSUE, fix in slice 3b.1).** `mc_monitor:check/2` opens a
+  10. **Heartbeat connection leak on a hung server (fixed in slice 3b.1).** `mc_monitor:check/2` opens a
      connection per heartbeat (`mc_worker_api:connect/1`, linked to the monitor) and only calls `disconnect` after a
      successful `hello`. When TCP connects but Mongo does not answer within 5 s (a stalled mongod: `docker pause`,
      SIGSTOP, disk or VM freeze), `hello` exits, the monitor's `catch _:_` swallows it, and the worker stays alive
@@ -653,9 +653,17 @@ OTP 28.4.2 (OP_MSG).
      10–11 s of hang; mongod never closes idle client connections, so they persist until Mongo, the topology or
      geo_service restarts (restarting geo_service clears them). Observed 5 → 6 → 8 → 10 connections over three 20 s
      pauses. A refused connect (Mongo stopped, most partitions) and server-side closes (Atlas failover/maintenance) do
-     not leak. No data or privacy impact. Fix planned in slice 3b.1 before Phase 6 or any Atlas use: a reaper in
-     `geo_mongo_probe` that disconnects `mc_worker` processes linked to the `mc_monitor` once they are older than 30 s
-     (a live heartbeat check lasts at most ~15 s), with a CT case where the proxy blackholes traffic for 35 s.
+     not leak. No data or privacy impact. **Fix (slice 3b.1):** `geo_mongo_probe` runs a reaper on its 5 s probe tick.
+     `geo_mongo_reaper:candidates/0` lists the `mc_worker` processes linked to the `mc_monitor` (identified by initial
+     call, so a driver upgrade must re-verify it); `select/4` picks those first seen at least 30 s ago (a live heartbeat
+     check lasts at most ~20 s (2 × connectTimeoutMS + 2 × call timeout), so none in progress is touched); the probe stops them with the public
+     `mc_worker_api:disconnect/1` (the monitor ignores that normal exit) and logs `mongo_heartbeat_reaped` at notice
+     level with a count only. Checked by `proxy_blackhole_no_heartbeat_leak`: the proxy blackholes traffic for 35 s (at
+     least 1 abandoned worker must exist, so the test cannot pass vacuously), then forwards again, and within 90 s,
+     polled every second, there must be 0 abandoned workers and at most pool size + 1 upstream sockets, with one pool.
+     Without the reaper the case fails with 2 abandoned workers and 7 sockets; with it, three runs converged after 20,
+     6 and 15 s (5 sockets). `{use_legacy_protocol, false}` in the worker options was not adopted: `mc_monitor` builds the heartbeat
+     connection args from host, port, timeout and TLS only, so the option would not reach the heartbeat workers.
 - **Topology placement:** a permanent worker child of `geo_mongo_sup` (`rest_for_one`, intensity 5 / period 10),
   registered as `geo_mongo_topology` (`geo_mongo:child_spec/1`: `{mongoc, connect, [Seed, TopologyOpts, WorkerOpts]}`).
   Child order: `mongo_id_server`, `mc_worker_pid_info`, `geo_mongo_pool_sup` (as `mc_pool_sup`), the topology,
@@ -688,8 +696,8 @@ a topology crash loop would stop the application (supervisor intensity 5/10), wh
 Log noise while Mongo is down: the driver's own reports are not rate-limited (round 1 measured thousands of lines before
 quirk 9 was fixed); with temporary pool children the outage log is bounded (checked by `proxy_outage_no_leak_no_flood`,
 at most 40 events in the down window), plus one `mongo_unavailable` / `mongo_ready` line per transition.
-Known issue: a hung (not stopped) Mongo leaks one heartbeat connection per ~10 s of hang until a restart (quirk 10);
-slice 3b.1 fixes it before Phase 6 or any Atlas use.
+A hung (not stopped) Mongo used to leak one heartbeat connection per ~10 s of hang (quirk 10); the reaper in
+`geo_mongo_probe` (slice 3b.1) now stops them once they are 30 s old, so during a hang at most about 3–4 extra heartbeat connections exist (one per ~10 s, each living 30–40 s); they are gone about 40 s after the hang ends.
 
 ### Live evidence
 **2026-11-20, Docker Desktop on Windows, round 1:**
@@ -722,3 +730,14 @@ slice 3b.1 fixes it before Phase 6 or any Atlas use.
   restart. **But each pause leaves extra connections:** 5 → 6 → 8 → 10 over three pauses (stable for 2 min after each).
   In the node: 1 `mc_monitor`, 1 `poolboy`, 10 `mc_worker`. 5 are pool workers; 5 are hibernating workers linked only to
   the `mc_monitor` (heartbeat connections it opened after timed-out checks and never closed). See quirk 10.
+
+**3b.1 live evidence (rebuilt image, container recreated):**
+- Start: ready after 7 s; 5 Mongo connections from the geo_service IP.
+- Three `docker compose pause mongo` cycles (20 s pause, then unpause): ready 200 after 5 s / 2 s / 2 s; connections
+  6 at +10 s and back to exactly 5 at +60 s after every cycle (before 3b.1: 5 → 6 → 8 → 10); RestartCount 0.
+- Five `notice: count: 1, event: mongo_heartbeat_reaped` lines over the three cycles; nothing else was added to the log.
+- No regression of quirk 9: two `stop mongo` / `start mongo` outages → ready 503 after 1 s / 3 s, 200 after 12 s / 8 s,
+  16 log lines each, 0 `start_error`, 5 connections after each.
+- Round 2 rebuild (initial_call pre-check in the reaper): three pauses → 5/6/5 connections at +10 s and exactly 5 at
+  +60 s each time; 4 `mongo_heartbeat_reaped` lines; RestartCount 0; two stop/start outages → 16 / 18 log lines,
+  0 `start_error`, 5 connections.
