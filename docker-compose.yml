@@ -70,6 +70,24 @@ services:
       start_period: 20s
     restart: unless-stopped
 
+  geo_service:
+    build:
+      context: ./geo_service
+    image: chaterl/geo_service:dev
+    environment:
+      GEO_HTTP_IP: "0.0.0.0"          # inside the container; the host side is 127.0.0.1 below
+      GEO_HTTP_PORT: ${GEO_HTTP_PORT:-8080}
+    ports:
+      # localhost only, like the other services (VITE_API_URL points here)
+      - "127.0.0.1:${GEO_HTTP_PORT:-8080}:${GEO_HTTP_PORT:-8080}"
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://127.0.0.1:$${GEO_HTTP_PORT}/api/health > /dev/null || exit 1"]
+      interval: 10s
+      timeout: 3s
+      retries: 10
+      start_period: 10s
+    restart: unless-stopped
+
 volumes:
   pg_data:
   mongo_data:

@@ -47,7 +47,10 @@ Prerequisites: Docker Desktop, Node 20+, Git Bash (on Windows).
 
 ```bash
 cp .env.example .env          # then replace every "change-me" with a random value
-docker compose up -d          # MongooseIM, PostgreSQL, MongoDB — wait until `docker compose ps` shows healthy
+docker compose up -d          # MongooseIM, PostgreSQL, MongoDB, geo_service — wait until `docker compose ps` shows 4 healthy
+curl http://127.0.0.1:8080/api/health    # geo_service (first start builds the image): {"status":"ok"}
+# after changing geo_service code, rebuild: plain `up -d` does not rebuild an existing image
+docker compose up -d --build geo_service
 bash infra/mongooseim/dev-seed.sh
 node tools/xmpp-smoke/serve.mjs
 ```
@@ -79,7 +82,7 @@ treated as insecure and shows a message instead.
 Room assignment is client-side and temporary here (ADR-013); the server takes over in Phase 3.
 
 1. `cp .env.example .env` and replace every `change-me`, then `docker compose up -d` and wait until
-   `docker compose ps` shows all three healthy.
+   `docker compose ps` shows all four healthy (geo_service is built from `geo_service/` on first start).
 2. `bash infra/mongooseim/dev-seed.sh` to create the `alice` and `bob` test users.
 3. `cd web && npm ci && npm run dev`, then open http://localhost:5173.
 4. Open a second window (a private one) so you have two sessions. Sign in as `alice` in one and `bob` in the other.

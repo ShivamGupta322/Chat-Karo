@@ -2,3 +2,13 @@
 *.sh   text eol=lf
 *.tmpl text eol=lf
 *.sql  text eol=lf
+
+# geo_service (Erlang) sources, config and Dockerfile are built/run on Linux: keep LF endings.
+*.erl text eol=lf
+*.hrl text eol=lf
+*.src text eol=lf
+*.config text eol=lf
+rebar.config text eol=lf
+rebar.lock text eol=lf
+Dockerfile text eol=lf
+.dockerignore text eol=lf

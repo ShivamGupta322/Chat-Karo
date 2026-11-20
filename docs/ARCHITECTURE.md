@@ -86,6 +86,23 @@ geo_service_sup (one_for_one)
 └── geo_http                  # Cowboy listener (ranch) — handlers are short-lived per request
 ```
 
+**Status (Phase 3a):** only `geo_http` exists under `geo_service_sup` (one_for_one, intensity 5 / period 10); the other
+children arrive in later slices. The listener is embedded with `ranch:child_spec/5` (`cowboy_clear` protocol), so it lives
+under our supervisor and a crash restarts it; `cowboy:start_clear/3` is deliberately not used. JSON is encoded
+with OTP's stdlib `json` (OTP 27+, pinned 28.4.2; see ADR-015). `geo_config` is the only module that reads the application
+environment: `GEO_HTTP_IP` / `GEO_HTTP_PORT` flow in through `config/sys.config.src` and are validated at start. A bad value
+stops the application and logs only the key name.
+
+`geohash` API (pure; no logging, no processes; matches `web/src/geo/geohash.ts`):
+
+| Function | Returns |
+|---|---|
+| `encode(Lat, Lng, Precision)` | `{ok, Hash}` or `{error, invalid_precision \| lat_out_of_range \| lng_out_of_range}` (precision checked first; never raises) |
+| `bounds(Hash)` | `{ok, #{south, west, north, east}}` or `{error, invalid_geohash}` |
+| `centre(Hash)` | `{ok, {Lat, Lng}}` (cell centre) or `{error, invalid_geohash}` |
+| `neighbour(Hash, Dir)` | `{ok, Hash2}` or `{error, invalid_geohash \| beyond_pole}`; `Dir` is `n ne e se s sw w nw` |
+| `neighbours(Hash)` | `{ok, #{Dir => Hash2}}`; directions past a pole are omitted; longitude wraps at ±180 |
+
 ### Modules
 
 | Module | Responsibility |
@@ -96,7 +113,10 @@ geo_service_sup (one_for_one)
 | `geo_rate` | Token-bucket rate limit + impossible-jump check (ETS) |
 | `geo_room` | Per-cell gen_server: activity tracking, idle shutdown, slow-mode settings |
 | `geo_room_sup` | Starts/stops `geo_room` children on demand |
-| `geo_http_*` | Cowboy handlers: `session`, `locate`, `places`, `report` |
+| `geo_config` | The only reader of app env; validates `http_ip` / `http_port` |
+| `geo_http` | Embedded ranch listener and routes |
+| `geo_http_reply` | JSON replies and security headers |
+| `geo_http_*` | Cowboy handlers: `health`, `not_found`, and later `session`, `locate`, `places`, `report` |
 | `geo_auth` | JWT issue/verify |
 | `geo_xmpp_admin` | Calls MongooseIM admin API (register user, set room affiliation) |
 | `geo_store` | All MongoDB access (rooms, places, profiles, reports) |

@@ -1,0 +1,16 @@
+%% Rendered by relx at release start. The values are quoted strings on purpose: an unset
+%% variable becomes "", which geo_config rejects (naming the key, never the value).
+[
+    {geo_service, [
+        {http_ip, "${GEO_HTTP_IP}"},
+        {http_port, "${GEO_HTTP_PORT}"}
+    ]},
+    {kernel, [
+        {logger_level, info},
+        {logger, [
+            {handler, default, logger_std_h, #{
+                formatter => {logger_formatter, #{single_line => true}}
+            }}
+        ]}
+    ]}
+].

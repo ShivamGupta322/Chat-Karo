@@ -53,9 +53,9 @@ Carry-forward for the next slices (from the 2a/2a+ reviews):
   desktop page stops scrolling vertically.
 
 ## Phase 3 — geo_service
-- [ ] rebar3 app, supervision tree, sys.config, Dockerfile
-- [ ] `geohash` module with EUnit + PropEr tests (encode/decode round-trip, neighbours)
-- [ ] Cowboy: `/api/health`, `/api/session`, `/api/locate`
+- [x] rebar3 app, supervision tree, sys.config, Dockerfile (slice 3a, ADR-015)
+- [x] `geohash` module with EUnit + PropEr tests (encode/decode round-trip, neighbours) (slice 3a)
+- [ ] Cowboy: `/api/health`, `/api/session`, `/api/locate` (3a done: `/api/health`)
 - [ ] MongoDB pool + `geo_store`; `init-indexes.js`
 - [ ] MongooseIM admin API integration: register users
 - [ ] Lock down MUC: `default_room.public = false` (a public disco listing of geohash rooms would reveal

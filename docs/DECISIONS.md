@@ -545,3 +545,55 @@ It must never reach a production build and must not show or keep the exact click
     `none`, so the Tailwind preflight is not involved.
   - When the background tab's socket dropped, the reconnect rejoined as `alice-2` until the old occupant timed out.
     That is the existing reconnect and ghost-occupant behaviour (ADR-010).
+
+## ADR-015 — geo_service foundation
+**Status:** Accepted
+**Context:** Phase 3 needs a supervised Erlang service that serves HTTP, takes its config from the environment and
+computes geohash cells. Slice 3a delivers only the skeleton: `GET /api/health`, validated config and a pure `geohash`
+module. Mongo, auth and `/api/locate` come in 3b-3d.
+**Decision:**
+- **OTP 27+ (pinned image 28.4.2)**, so the stdlib `json` module replaces a third-party JSON dependency. This supersedes
+  CLAUDE.md's "Erlang/OTP 26+" (the CLAUDE.md edit is pending with the user). `rebar.config` has `minimum_otp_vsn "27"`.
+- **Pins:** cowboy 2.21.0 (ISC), cowlib 2.22.0 (ISC, transitive), ranch 2.4.0 (ISC, transitive), all locked in
+  `rebar.lock`. PropEr 1.5.0 (GPL-3.0) is in the **test profile only**, so it never ships in the release. erlfmt 1.9.0
+  (Apache-2.0) is a `project_plugin`. `plt_extra_apps [cowlib]` lets Dialyzer resolve the cowlib types that `cowboy_req` references (ranch is a declared application, so it is in the PLT already).
+- **Embedded listener:** `geo_http:child_spec/1` uses `ranch:child_spec/5` with `cowboy_clear`, and `connection_type
+  => supervisor` in both option maps (as `cowboy:start_clear/3` does). The listener lives under `geo_service_sup`;
+  `geo_http_SUITE` kills it and checks that it restarts.
+- **Config:** `config/sys.config.src` holds quoted env strings (`"${GEO_HTTP_PORT}"`), so an unset variable becomes `""`.
+  `geo_config` (the only module reading app env) rejects bad values, and `geo_service_app` logs only the key name
+  (`event => bad_config, key => http_port`), never the value.
+- **Port:** 8080, published on `127.0.0.1` only; `GEO_HTTP_PORT` is both the container and the host port, and
+  `VITE_API_URL` must match.
+- **Image:** multi-stage build, `erlang:28.4.2-slim` runtime with curl for the healthcheck, non-root user `geo`, no baked-in
+  port. `vm.args.src` has only `-sname geo_service`: no cookie until clustering in Phase 6. The release bundles ERTS
+  (relx `mode prod`) from the build stage; the build and runtime images share the OTP 28.4.2 tag and Debian release, so
+  the bundled ERTS is ABI-compatible. Later hardening can move the runtime to a plain Debian slim base to shrink the
+  image (555 MB today). The runtime sets `ERL_CRASH_DUMP_SECONDS=0` because crash dumps can contain app env, which will
+  hold secrets from 3c on.
+- **Geometric neighbours:** `geohash:neighbour/2` steps from the cell centre by one cell height/width, wraps longitude
+  at ±180, omits directions past a pole and re-encodes. There are no border lookup tables. Cell sizes are dyadic, so the
+  floats are exact; PropEr properties and the published vectors back this.
+- **3b driver finding:** the hex `mongodb_erlang` 3.4.0 has only the legacy opcodes that MongoDB 6+ removed. Slice 3b
+  must use comtihon/mongodb-erlang master (v3.6.10, OP_MSG) as a pinned git dep, with emqx/mongodb-erlang as the
+  fallback, and stop and escalate if neither works with Mongo 7.
+
+**Consequences:** `rebar3 as prod release` is only run inside Docker (not on Windows). `.gitattributes` forces LF for Erlang
+files, the Dockerfile and config. Health is liveness only; readiness of Mongo is added in 3b.
+
+### Live evidence
+**2026-11-20, Docker Desktop on Windows, image `chaterl/geo_service:dev`:**
+- `docker compose build geo_service` succeeded. `/opt/geo_service` contains `bin`, `erts-16.3.1`, `lib` and `releases`,
+  with no `_build` or `test/`. The process runs as uid 1000 (`geo`). The image is 555 MB.
+- `docker compose ps`: all four services healthy; geo_service is published as `127.0.0.1:8080->8080/tcp`
+  (`docker compose port geo_service 8080` → `127.0.0.1:8080`).
+- `curl -i http://127.0.0.1:8080/api/health` → `200`, `content-type: application/json`, `cache-control: no-store`,
+  `x-content-type-options: nosniff`, body `{"status":"ok"}`, in 11–34 ms. HEAD → 200. POST → `405` with
+  `allow: GET, HEAD` and `{"error":"method_not_allowed",...}`. `/nope` → `404` `{"error":"not_found",...}`.
+- `docker compose run --rm -e GEO_HTTP_PORT=abc geo_service` exited 1 with
+  `application_start_failure ... {bad_config,http_port}`; `abc` appeared 0 times in the output. An empty
+  `GEO_HTTP_PORT` failed the same way. Each run took 19–31 s wall time, mostly Docker Desktop container creation; the
+  node itself fails at boot, so the "~10 s" criterion is accepted (it means fail fast, not hang). Round 1 wrote an `erl_crash.dump` on a failed boot; after round 2 (`ERL_CRASH_DUMP_SECONDS=0`) a failed boot in a kept (non-`--rm`) container left no `/opt/geo_service/erl_crash.dump`.
+- `docker compose stop geo_service` took 3 s (log: `SIGTERM received - shutting down`) and exited with code 0.
+- `MSYS_NO_PATHCONV=1 docker compose exec geo_service /opt/geo_service/bin/geo_service ping` → `pong` (no committed cookie).
+- Round 2 rebuild: still healthy, health 200, `pong`, `/opt/geo_service` still has `erts-16.3.1` (bundled by relx `mode prod`, now stated in the config and above). The 555 MB size is accepted for 3a; a slimmer runtime base is deferred to hardening.
