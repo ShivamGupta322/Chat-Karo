@@ -24,7 +24,7 @@ d.rooms.createIndex(
 ensureCollection("places");
 d.places.createIndex({ location: "2dsphere" }, { name: "location_2dsphere" });
 
-// profiles — _id = XMPP localpart
+// profiles — _id = the random XMPP localpart u<32 hex> (never derived from the nickname)
 ensureCollection("profiles");
 // Case-insensitive uniqueness: "Alice" and "alice" are the same nickname. Queries that should use this
 // index must pass the same collation.
@@ -32,6 +32,10 @@ d.profiles.createIndex(
   { nickname: 1 },
   { name: "nickname_unique_ci", unique: true, collation: { locale: "en", strength: 2 } }
 );
+// A pending reservation (state "pending") carries expiresAt = createdAt + 600 s; the TTL monitor deletes
+// orphaned ones so their nickname becomes free again (within ~11 min, the monitor runs every 60 s).
+// Activation unsets expiresAt, so active profiles never expire. Must be a BSON Date.
+d.profiles.createIndex({ expiresAt: 1 }, { name: "expiresAt_ttl", expireAfterSeconds: 0 });
 
 // reports — moderation reports, kept 30 days
 ensureCollection("reports");

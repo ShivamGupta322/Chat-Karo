@@ -8,12 +8,13 @@ start(_Type, _Args) ->
     maybe
         {ok, Listen} ?= geo_config:http_listen(),
         {ok, Mongo} ?= geo_config:mongo(),
+        {ok, Session} ?= geo_config:session(),
         %% The redaction filter must be in place before anything that holds the password starts.
-        ok = geo_log_redact:install(secrets(Mongo)),
+        ok = geo_log_redact:install(secrets(Mongo, Session)),
         %% The filter stays installed if the supervisor fails to start: the application
         %% controller logs the exit reason after this returns, and it could carry the password.
         %% It is uninstalled in stop/1 only.
-        geo_service_sup:start_link(#{listen => Listen, mongo => Mongo})
+        geo_service_sup:start_link(#{listen => Listen, mongo => Mongo, session => Session})
     else
         {error, {bad_config, Key}} = Failure ->
             %% Key name only: never log the configured value.
@@ -25,6 +26,12 @@ start(_Type, _Args) ->
 stop(_State) ->
     geo_log_redact:uninstall().
 
--spec secrets(geo_config:mongo()) -> [binary()].
-secrets(#{auth := #{password := Password}}) -> [Password];
-secrets(#{auth := none}) -> [].
+%% The mongo password, the MongooseIM admin password (and its base64 form in the Basic header)
+%% and the JWT secret. Run-time secrets (XMPP passwords, tokens) are caught by patterns.
+-spec secrets(geo_config:mongo(), geo_config:session_cfg()) -> [binary()].
+secrets(Mongo, #{jwt_secret := JwtSecret, admin := #{password := AdminPassword, basic_b64 := Basic}}) ->
+    mongo_secrets(Mongo) ++ [AdminPassword, Basic, JwtSecret].
+
+-spec mongo_secrets(geo_config:mongo()) -> [binary()].
+mongo_secrets(#{auth := #{password := Password}}) -> [Password];
+mongo_secrets(#{auth := none}) -> [].

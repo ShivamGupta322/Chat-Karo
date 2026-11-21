@@ -12,7 +12,12 @@
         {mongo_auth_source, "${MONGO_AUTH_SOURCE}"},
         {mongo_tls, "${MONGO_TLS}"},
         {mongo_tls_ca_file, "${MONGO_TLS_CA_FILE}"},
-        {mongo_pool_size, "${MONGO_POOL_SIZE}"}
+        {mongo_pool_size, "${MONGO_POOL_SIZE}"},
+        {jwt_secret, "${JWT_SECRET}"},
+        {xmpp_domain, "${XMPP_DOMAIN}"},
+        {mim_admin_url, "${MONGOOSEIM_ADMIN_URL}"},
+        {mim_admin_user, "${MONGOOSEIM_ADMIN_USER}"},
+        {mim_admin_password, "${MONGOOSEIM_ADMIN_PASSWORD}"}
     ]},
     {kernel, [
         {logger_level, info},

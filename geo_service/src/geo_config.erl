@@ -13,7 +13,15 @@
     parse_tls_ca_file/1,
     parse_pool_size/1
 ]).
--export_type([listen/0, mongo/0, mongo_seed/0, mongo_key/0]).
+-export([
+    session/0,
+    parse_jwt_secret/1,
+    parse_xmpp_domain/1,
+    parse_admin_url/1,
+    parse_admin_user/1,
+    parse_admin_password/1
+]).
+-export_type([listen/0, mongo/0, mongo_seed/0, mongo_key/0, session_cfg/0, session_key/0]).
 
 -type listen() :: #{ip := inet:ip4_address(), port := inet:port_number()}.
 %% "host:port" strings, as the mongodb driver wants them.
@@ -35,6 +43,14 @@
     | mongo_tls
     | mongo_tls_ca_file
     | mongo_pool_size.
+
+-type session_key() ::
+    jwt_secret | xmpp_domain | mim_admin_url | mim_admin_user | mim_admin_password.
+-type session_cfg() :: #{
+    jwt_secret := binary(),
+    xmpp_domain := binary(),
+    admin := geo_xmpp_admin:admin()
+}.
 
 %% The only function in the code base that reads the application environment.
 -spec http_listen() -> {ok, listen()} | {error, {bad_config, http_ip | http_port}}.
@@ -112,7 +128,8 @@ mongo() ->
         }}
     end.
 
--spec bad(mongo_key(), {ok, T} | error) -> {ok, T} | {error, {bad_config, mongo_key()}}.
+-spec bad(Key, {ok, T} | error) -> {ok, T} | {error, {bad_config, Key}} when
+    Key :: mongo_key() | session_key().
 bad(_Key, {ok, _} = Ok) -> Ok;
 bad(Key, error) -> {error, {bad_config, Key}}.
 
@@ -282,6 +299,101 @@ parse_pool_size(Value) ->
             end;
         _ ->
             error
+    end.
+
+%%% Session (JWT + MongooseIM admin API) ------------------------------------------------
+
+%% Validation order: jwt_secret, xmpp_domain, mim_admin_url, mim_admin_user, mim_admin_password.
+%% Errors name the key only, never the value (these are secrets).
+-spec session() -> {ok, session_cfg()} | {error, {bad_config, session_key()}}.
+session() ->
+    Get = fun(Key) -> application:get_env(geo_service, Key, undefined) end,
+    maybe
+        {ok, Secret} ?= bad(jwt_secret, parse_jwt_secret(Get(jwt_secret))),
+        {ok, Domain} ?= bad(xmpp_domain, parse_xmpp_domain(Get(xmpp_domain))),
+        {ok, Url} ?= bad(mim_admin_url, parse_admin_url(Get(mim_admin_url))),
+        {ok, User} ?= bad(mim_admin_user, parse_admin_user(Get(mim_admin_user))),
+        {ok, Password} ?= bad(mim_admin_password, parse_admin_password(Get(mim_admin_password))),
+        Basic = base64:encode(<<User/binary, ":", Password/binary>>),
+        {ok, #{
+            jwt_secret => Secret,
+            xmpp_domain => Domain,
+            admin => #{
+                url => Url,
+                authorization => <<"Basic ", Basic/binary>>,
+                basic_b64 => Basic,
+                password => Password
+            }
+        }}
+    end.
+
+%% 32..512 printable ASCII (no `"` or `\`), at least 10 distinct characters, and not a
+%% placeholder starting with change-me (any case). The HMAC key is the raw bytes.
+-spec parse_jwt_secret(term()) -> {ok, binary()} | error.
+parse_jwt_secret(Value) ->
+    case parse_password(Value) of
+        {ok, Bin} when byte_size(Bin) >= 32, byte_size(Bin) =< 512 ->
+            Distinct = length(lists:usort(binary_to_list(Bin))),
+            Placeholder = string:prefix(string:lowercase(Bin), <<"change-me">>) =/= nomatch,
+            case Distinct >= 10 andalso not Placeholder of
+                true -> {ok, Bin};
+                false -> error
+            end;
+        _ ->
+            error
+    end.
+
+%% Lowercase only: MongooseIM returns lowercased JIDs, so an uppercase domain would make every
+%% registration's JID check fail (ADR-017).
+-spec parse_xmpp_domain(term()) -> {ok, binary()} | error.
+parse_xmpp_domain(Value) ->
+    case required_name(Value, 253, fun host_char/1) of
+        {ok, Domain} ->
+            case string:lowercase(Domain) of
+                Domain -> {ok, Domain};
+                _ -> error
+            end;
+        error ->
+            error
+    end.
+
+%% An http:// URL with a host and a non-empty path; no credentials, query or fragment (the
+%% admin credentials travel in the Authorization header). Returned as a string for httpc.
+-spec parse_admin_url(term()) -> {ok, string()} | error.
+parse_admin_url(Value) ->
+    case text(Value) of
+        {ok, Bin} when byte_size(Bin) >= 1, byte_size(Bin) =< 2048 ->
+            Str = binary_to_list(Bin),
+            case lists:all(fun(C) -> C >= 33 andalso C =< 126 end, Str) of
+                true -> admin_url(uri_string:parse(Str), Str);
+                false -> error
+            end;
+        _ ->
+            error
+    end.
+
+-spec admin_url(uri_string:uri_map() | uri_string:error(), string()) -> {ok, string()} | error.
+admin_url(
+    #{scheme := "http", host := [_ | _], path := [_ | _]} = Uri, Str
+) ->
+    case
+        maps:is_key(userinfo, Uri) orelse maps:is_key(query, Uri) orelse maps:is_key(fragment, Uri)
+    of
+        true -> error;
+        false -> {ok, Str}
+    end;
+admin_url(_, _) ->
+    error.
+
+-spec parse_admin_user(term()) -> {ok, binary()} | error.
+parse_admin_user(Value) ->
+    required_name(Value, 128, fun user_char/1).
+
+-spec parse_admin_password(term()) -> {ok, binary()} | error.
+parse_admin_password(Value) ->
+    case parse_password(Value) of
+        {ok, <<_, _/binary>> = Bin} -> {ok, Bin};
+        _ -> error
     end.
 
 %%% helpers

@@ -385,3 +385,174 @@ base_mongo(Overrides) ->
         mongo_pool_size => ""
     },
     maps:foreach(fun set/2, maps:merge(Base, Overrides)).
+
+%%% session() -------------------------------------------------------------------------------
+
+-define(SESSION_KEYS, [jwt_secret, xmpp_domain, mim_admin_url, mim_admin_user, mim_admin_password]).
+-define(GOOD_SECRET, "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef").
+
+jwt_secret_accepts_test_() ->
+    [
+        ?_assertEqual({ok, <<?GOOD_SECRET>>}, geo_config:parse_jwt_secret(?GOOD_SECRET)),
+        ?_assertEqual({ok, <<?GOOD_SECRET>>}, geo_config:parse_jwt_secret(<<?GOOD_SECRET>>)),
+        ?_assertMatch({ok, _}, geo_config:parse_jwt_secret(lists:duplicate(32, $a) ++ "bcdefghij")),
+        ?_assertMatch({ok, _}, geo_config:parse_jwt_secret(sample_secret(512)))
+    ].
+
+jwt_secret_rejects_test_() ->
+    [
+        ?_assertEqual(error, geo_config:parse_jwt_secret(In))
+     || In <- [
+            "",
+            undefined,
+            sample_secret(31),
+            lists:duplicate(32, $a),
+            "change-me-to-a-long-random-string",
+            string:uppercase("change-me-") ++ sample_secret(54),
+            "Change-Me-" ++ sample_secret(54),
+            sample_secret(40) ++ "\"",
+            sample_secret(40) ++ "\\",
+            sample_secret(40) ++ "\r",
+            sample_secret(40) ++ [200],
+            sample_secret(513)
+        ]
+    ].
+
+xmpp_domain_test_() ->
+    [
+        ?_assertEqual(
+            {ok, <<"chaterl.localhost">>}, geo_config:parse_xmpp_domain("chaterl.localhost")
+        ),
+        ?_assertEqual(error, geo_config:parse_xmpp_domain("")),
+        ?_assertEqual(error, geo_config:parse_xmpp_domain("a b")),
+        ?_assertEqual(error, geo_config:parse_xmpp_domain("a/b")),
+        ?_assertEqual(error, geo_config:parse_xmpp_domain(lists:duplicate(254, $a))),
+        %% MongooseIM lowercases JIDs, so an uppercase domain is rejected.
+        ?_assertEqual(error, geo_config:parse_xmpp_domain("Chaterl.Localhost")),
+        ?_assertEqual(error, geo_config:parse_xmpp_domain("CHATERL.LOCALHOST"))
+    ].
+
+admin_url_test_() ->
+    [
+        ?_assertEqual(
+            {ok, "http://mongooseim:5551/api/graphql"},
+            geo_config:parse_admin_url("http://mongooseim:5551/api/graphql")
+        )
+        | [
+            ?_assertEqual(error, geo_config:parse_admin_url(In))
+         || In <- [
+                "",
+                "https://mongooseim:5551/api/graphql",
+                "ftp://h/x",
+                "http://u:p@h/x",
+                "http:///x",
+                "http://h",
+                "http://h/x?q=1",
+                "http://h/x#f",
+                "http://h/a b",
+                undefined
+            ]
+        ]
+    ].
+
+admin_user_and_password_test_() ->
+    [
+        ?_assertEqual({ok, <<"admin">>}, geo_config:parse_admin_user("admin")),
+        ?_assertEqual(error, geo_config:parse_admin_user("")),
+        ?_assertEqual(error, geo_config:parse_admin_user("a:b")),
+        ?_assertEqual(error, geo_config:parse_admin_user("a b")),
+        ?_assertEqual({ok, <<"pw 1">>}, geo_config:parse_admin_password("pw 1")),
+        ?_assertEqual(error, geo_config:parse_admin_password("")),
+        ?_assertEqual(error, geo_config:parse_admin_password("a\"b")),
+        ?_assertEqual(error, geo_config:parse_admin_password("a\b")),
+        ?_assertEqual(error, geo_config:parse_admin_password("a\r"))
+    ].
+
+session_test_() ->
+    {foreach, fun save_session_env/0, fun restore_env/1, [
+        fun(_) ->
+            base_session(#{}),
+            [
+                ?_assertMatch(
+                    {ok, #{
+                        jwt_secret := <<?GOOD_SECRET>>,
+                        xmpp_domain := <<"chaterl.localhost">>,
+                        admin := #{
+                            url := "http://mongooseim:5551/api/graphql",
+                            authorization := <<"Basic ", _/binary>>,
+                            password := <<"adm1n pw">>
+                        }
+                    }},
+                    geo_config:session()
+                ),
+                ?_assertMatch(
+                    {ok, #{admin := #{basic_b64 := B}}} when
+                        B =:= <<"YWRtaW46YWRtMW4gcHc=">>,
+                    geo_config:session()
+                )
+            ]
+        end
+        | [
+            fun(_) ->
+                base_session(#{Key => Value}),
+                ?_assertEqual({error, {bad_config, Key}}, geo_config:session())
+            end
+         || {Key, Value} <- [
+                {jwt_secret, ""},
+                {jwt_secret, "short"},
+                {jwt_secret, lists:duplicate(40, $a)},
+                {xmpp_domain, ""},
+                {mim_admin_url, "https://mongooseim:5551/api/graphql"},
+                {mim_admin_user, ""},
+                {mim_admin_password, ""}
+            ]
+        ] ++
+            [
+                %% The first invalid key in order wins.
+                fun(_) ->
+                    base_session(#{jwt_secret => "", mim_admin_url => "x"}),
+                    ?_assertEqual({error, {bad_config, jwt_secret}}, geo_config:session())
+                end,
+                fun(_) ->
+                    base_session(#{}),
+                    unset(xmpp_domain),
+                    ?_assertEqual({error, {bad_config, xmpp_domain}}, geo_config:session())
+                end,
+                %% No error ever contains the offending value.
+                fun(_) ->
+                    base_session(#{jwt_secret => ?PW_SENTINEL ++ "\""}),
+                    Result = geo_config:session(),
+                    [
+                        ?_assertEqual({error, {bad_config, jwt_secret}}, Result),
+                        ?_assertEqual(nomatch, string:find(printed(Result), ?PW_SENTINEL))
+                    ]
+                end,
+                fun(_) ->
+                    base_session(#{mim_admin_password => ?PW_SENTINEL ++ "\"", mim_admin_user => ""}),
+                    Result = geo_config:session(),
+                    [
+                        ?_assertEqual({error, {bad_config, mim_admin_user}}, Result),
+                        ?_assertEqual(nomatch, string:find(printed(Result), ?PW_SENTINEL))
+                    ]
+                end
+            ]
+    ]}.
+
+save_session_env() ->
+    [{K, application:get_env(geo_service, K)} || K <- ?SESSION_KEYS].
+
+%% A valid session config, with overrides.
+base_session(Overrides) ->
+    Base = #{
+        jwt_secret => ?GOOD_SECRET,
+        xmpp_domain => "chaterl.localhost",
+        mim_admin_url => "http://mongooseim:5551/api/graphql",
+        mim_admin_user => "admin",
+        mim_admin_password => "adm1n pw"
+    },
+    maps:foreach(fun set/2, maps:merge(Base, Overrides)).
+
+%% N printable characters with plenty of distinct ones.
+sample_secret(N) ->
+    Alphabet = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789",
+    [lists:nth(1 + (I rem length(Alphabet)), Alphabet) || I <- lists:seq(0, N - 1)].

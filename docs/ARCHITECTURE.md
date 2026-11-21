@@ -39,9 +39,14 @@ In production a reverse proxy (Caddy or nginx) terminates TLS and routes `/api` 
 ## Key flows
 
 ### Login
-1. Client `POST /api/session {nickname}` → geo_service creates/fetches profile in MongoDB, registers the
-   XMPP user via MongooseIM's admin API if new, returns `{jid, xmpp_password_or_token, api_jwt}`.
-2. Client connects to `wss://…/ws-xmpp` with Strophe.js and authenticates (SASL).
+1. Client `POST /api/session {nickname}` (ADR-017). geo_service validates the nickname, reserves it in
+   `profiles` (the unique case-insensitive index is the claim), generates a random localpart `u<32 hex>` and a
+   random password `xp1_…`, registers that account in MongooseIM through the admin GraphQL API (a real rdbms user,
+   SCRAM-hashed there), activates the profile and returns `{nickname, jid, xmpp_password, token, token_type,
+   expires_in}` once. The token is a 1 h HS256 JWT for geo_service only. The client keeps `{jid, xmpp_password}`
+   as its long-lived device credential. Renewal (`POST /api/session/renew {jid, xmpp_password}`, checked with the
+   admin `checkPassword`) is designed now and built in 3e. A lost device is a new identity.
+2. Client connects to `wss://…/ws-xmpp` with Strophe.js and authenticates (SASL) with `jid` + `xmpp_password`.
 
 ### Locate & join
 1. Client gets `{lat, lng, accuracy}` from `navigator.geolocation.watchPosition`.
@@ -101,7 +106,16 @@ under our supervisor and a crash restarts it; `cowboy:start_clear/3` is delibera
 with OTP's stdlib `json` (OTP 27+, pinned 28.4.2; see ADR-015). `geo_config` is the only module that reads the application
 environment: `GEO_HTTP_IP` / `GEO_HTTP_PORT` and the `MONGO_*` variables flow in through `config/sys.config.src` and are validated at
 start. A bad value stops the application and logs only the key name. A logger filter (`geo_log_redact`) is installed
-before the supervisor and replaces the Mongo password with `[REDACTED]` in every log event.
+before the supervisor and replaces the Mongo password, the MongooseIM admin password (and its base64 form in the
+`Authorization` header) and the JWT secret with `[REDACTED]` in every log event. Two patterns also catch secrets minted at
+run time: XMPP passwords (`xp1_` + 32 characters) and JWT-shaped strings.
+
+**Status (Phase 3c):** `POST /api/session` is live. `inets` (OTP `httpc`, default profile, per-request options only) is the
+admin API client. New environment keys, validated by `geo_config:session/0` (key name only in errors): `JWT_SECRET`
+(32..512 printable ASCII, at least 10 distinct characters, not starting with `change-me`), `XMPP_DOMAIN`,
+`MONGOOSEIM_ADMIN_URL` (http only), `MONGOOSEIM_ADMIN_USER`, `MONGOOSEIM_ADMIN_PASSWORD`. `/api/ready` does not depend on
+the admin API: a MongooseIM outage only makes session requests answer 503. The request runs in the Cowboy request
+process (no gen_server). Rate limiting is deferred (Phase 4 and 6 in the roadmap).
 
 `geohash` API (pure; no logging, no processes; matches `web/src/geo/geohash.ts`):
 
@@ -125,23 +139,26 @@ before the supervisor and replaces the Mongo password with `[REDACTED]` in every
 | `geo_mongo` | Driver topology child spec, `ready/0`, `ping/0`, `update_one/4`, `find_one/3`, write-result classification |
 | `geo_mongo_probe` | gen_server owning the `geo_mongo_status` ETS table (up/down), probes every 5 s, reaps abandoned heartbeat connections |
 | `geo_mongo_reaper` | Pure: finds the driver monitor's abandoned heartbeat `mc_worker` processes and picks those older than 30 s (ADR-016 quirk 10) |
-| `geo_log_redact` | Logger primary filter that redacts the Mongo password |
+| `geo_log_redact` | Logger primary filter that redacts the configured secrets plus run-time patterns (xp1_ passwords, JWTs) |
 | `geo_rate` | Token-bucket rate limit + impossible-jump check (ETS) |
 | `geo_room` | Per-cell gen_server: activity tracking, idle shutdown, slow-mode settings |
 | `geo_room_sup` | Starts/stops `geo_room` children on demand |
-| `geo_config` | The only reader of app env; validates `http_ip` / `http_port` and the `mongo_*` keys |
+| `geo_config` | The only reader of app env; validates `http_ip` / `http_port`, the `mongo_*` keys and `session/0` (JWT secret, XMPP domain, admin API) |
 | `geo_http` | Embedded ranch listener and routes |
 | `geo_http_reply` | JSON replies and security headers |
-| `geo_http_*` | Cowboy handlers: `health`, `ready`, `not_found`, and later `session`, `locate`, `places`, `report` |
-| `geo_auth` | JWT issue/verify |
-| `geo_xmpp_admin` | Calls MongooseIM admin API (register user, set room affiliation) |
-| `geo_store` | All MongoDB access (rooms, places, profiles, reports); 3b has rooms only: `touch_room/1,2`, `get_room/1`. Takes cells, never coordinates |
+| `geo_http_*` | Cowboy handlers: `health`, `ready`, `not_found`, `session`, and later `locate`, `places`, `report` |
+| `geo_http_json` | Reads a small JSON-object body: content type, size cap, decoding |
+| `geo_auth` | Pure HS256 JWT issue/verify (HS256 only, constant-time signature check before the payload is parsed) |
+| `geo_nickname` | Pure nickname rules and the reserved list |
+| `geo_session` | Creates a session: reserve the nickname, register the XMPP account, activate, issue the JWT, roll back on failure |
+| `geo_xmpp_admin` | MongooseIM admin GraphQL client (`registerUser`, `removeUser`); later room affiliations. Never logs bodies |
+| `geo_store` | All MongoDB access: rooms (`touch_room/1,2`, `get_room/1`) and profiles (`create_pending_profile/3`, `activate_profile/1`, `delete_profile/1`, `get_profile/1`); places and reports later. Takes cells, never coordinates |
 
 ### HTTP API (v1)
 
 | Method | Path | Body → Response |
 |---|---|---|
-| POST | `/api/session` | `{nickname}` → `{jid, xmpp_credentials, token}` |
+| POST | `/api/session` | `{nickname}` → `201 {nickname, jid, xmpp_password, token, token_type:"Bearer", expires_in:3600}`; errors `400 invalid_json / invalid_request / invalid_nickname`, `405`, `409 nickname_taken` (also for reserved names), `413`, `415`, `503` (+ `retry-after: 5`), `500`. Body cap 1024 bytes. Never logged |
 | POST | `/api/locate` | `{lat, lng, accuracy, range}` → `{cell, room_jid, places}` |
 | GET | `/api/rooms/nearby?cell=…` | → active rooms in neighbouring cells |
 | GET | `/api/places?cell=…` | → named places in/near cell |
@@ -169,8 +186,10 @@ Errors: `{error: "<code>", message: "<human text>"}` with proper HTTP status.
 // indexes: location 2dsphere
 
 // profiles
-{ _id: "<xmpp localpart>", nickname, status: "just arrived", createdAt, blocked: ["<localpart>"] }
-// indexes: nickname unique, case-insensitive (collation en/strength 2)
+{ _id: "u<32 hex> (random XMPP localpart)", nickname, state: "pending" | "active", createdAt,
+  expiresAt (pending only: createdAt + 600 s) }   // status / blocked: later slices
+// indexes: nickname_unique_ci (nickname, unique, collation en/strength 2),
+//          expiresAt_ttl (expireAfterSeconds 0: orphaned pending reservations free their nickname)
 
 // reports
 { _id, roomId, messageId, reporter, reason, createdAt }
@@ -208,7 +227,9 @@ leaves old / joins new → incoming stanzas dispatched to message & presence sto
 ## Security
 
 - TLS everywhere outside the Docker network.
-- JWT (short-lived) for geo_service; XMPP SASL for MongooseIM.
+- JWT (1 h, HS256, claims iss/aud/sub/iat/exp/jti, no nickname) for geo_service; XMPP SASL for MongooseIM. The XMPP
+  password is returned once and never logged; bodies of `/api/session` and of the admin API are never logged.
+- No CORS: the client calls `/api/` same-origin (Vite proxy in dev, reverse proxy in production).
 - Input validation at every HTTP handler; message length limits enforced in MongooseIM config + client.
 - Rate limits: per-user locate (token bucket), per-room slow mode, MongooseIM traffic shaping.
 - No coordinates in logs, DB, or XMPP stanzas.

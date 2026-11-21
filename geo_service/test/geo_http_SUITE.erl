@@ -16,6 +16,8 @@
 -export([log/2]).
 
 -define(SENTINEL, "secret-sentinel-8o8o").
+%% 20 characters: below the 32-character minimum of the JWT secret.
+-define(JWT_SENTINEL, "jwt-sentinel-1234567").
 
 all() -> [{group, running}, bad_config_fails_start_without_leaking_value].
 
@@ -35,6 +37,7 @@ init_per_suite(Config) ->
     {ok, _} = application:ensure_all_started(inets),
     %% Nothing listens on port 1: this suite runs without MongoDB (readiness is 503).
     set_mongo("127.0.0.1:1", ""),
+    set_session(),
     Config.
 
 end_per_suite(_Config) ->
@@ -149,7 +152,31 @@ bad_config_fails_start_without_leaking_value(_Config) ->
     set_mongo("", ""),
     {error, Reason2} = application:start(geo_service),
     true = contains(Reason2, {bad_config, mongo_hosts}),
-    set_mongo("127.0.0.1:1", "").
+    set_mongo("127.0.0.1:1", ""),
+    %% A bad session setting is a fail-fast bad_config naming the key, and the value (here a
+    %% 20-character sentinel, too short for the JWT secret) never reaches the logs.
+    set_session(),
+    application:set_env(geo_service, jwt_secret, ?JWT_SENTINEL),
+    ok = logger:add_handler(HandlerId, ?MODULE, #{config => #{test_pid => self()}}),
+    Result3 =
+        try
+            application:start(geo_service)
+        after
+            logger:remove_handler(HandlerId)
+        end,
+    {error, Reason3} = Result3,
+    true = contains(Reason3, {bad_config, jwt_secret}),
+    false = contains(Reason3, ?JWT_SENTINEL),
+    Events3 = collect_events([]),
+    true = lists:any(fun is_jwt_config_event/1, Events3),
+    lists:foreach(
+        fun(Event) ->
+            Text = lists:flatten(io_lib:format("~0p", [Event])),
+            nomatch = string:find(Text, ?JWT_SENTINEL)
+        end,
+        Events3
+    ),
+    set_session().
 
 %%% logger handler -----------------------------------------------------------------------
 
@@ -176,6 +203,19 @@ set_mongo(Hosts, Password) ->
             {mongo_tls, ""},
             {mongo_tls_ca_file, ""},
             {mongo_pool_size, ""}
+        ]
+    ).
+
+%% Valid session settings; nothing listens on the admin URL (port 1).
+set_session() ->
+    lists:foreach(
+        fun({K, V}) -> application:set_env(geo_service, K, V) end,
+        [
+            {jwt_secret, "http-suite-jwt-secret-0123456789-abcdefgh"},
+            {xmpp_domain, "chaterl.localhost"},
+            {mim_admin_url, "http://127.0.0.1:1/api/graphql"},
+            {mim_admin_user, "admin"},
+            {mim_admin_password, "http-suite-admin-password"}
         ]
     ).
 
@@ -216,6 +256,9 @@ collect_events(Acc) ->
 
 is_bad_config_event(#{msg := {report, #{event := bad_config, key := http_port}}}) -> true;
 is_bad_config_event(_) -> false.
+
+is_jwt_config_event(#{msg := {report, #{event := bad_config, key := jwt_secret}}}) -> true;
+is_jwt_config_event(_) -> false.
 
 %% True if the printed form of Sub occurs in the printed form of Term.
 contains(Term, Sub) ->

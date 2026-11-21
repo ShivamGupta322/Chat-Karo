@@ -8,7 +8,7 @@
 event(Msg) -> #{level => error, msg => Msg, meta => #{}}.
 
 run(Msg) ->
-    #{msg := Out} = geo_log_redact:filter(event(Msg), [?SECRET]),
+    #{msg := Out} = geo_log_redact:filter(event(Msg), geo_log_redact:args([?SECRET])),
     Out.
 
 filter_ids() ->
@@ -63,14 +63,16 @@ non_matching_event_unchanged_test() ->
     Event = event(
         {report, #{event => mongo_ready, list => [1, 2, 3], tup => {a, <<"b">>}, s => "text"}}
     ),
-    ?assertEqual(Event, geo_log_redact:filter(Event, [?SECRET])).
+    ?assertEqual(Event, geo_log_redact:filter(Event, geo_log_redact:args([?SECRET]))).
 
-empty_secret_list_is_noop_test() ->
+empty_secret_list_keeps_other_text_test() ->
     Event = event({report, #{pw => ?SECRET}}),
-    ?assertEqual(Event, geo_log_redact:filter(Event, [])).
+    ?assertEqual(Event, geo_log_redact:filter(Event, geo_log_redact:args([]))).
 
 event_without_msg_unchanged_test() ->
-    ?assertEqual(#{level => info}, geo_log_redact:filter(#{level => info}, [?SECRET])).
+    ?assertEqual(
+        #{level => info}, geo_log_redact:filter(#{level => info}, geo_log_redact:args([?SECRET]))
+    ).
 
 install_twice_leaves_one_filter_test() ->
     try
@@ -82,11 +84,64 @@ install_twice_leaves_one_filter_test() ->
     end,
     ?assertEqual([], filter_ids()).
 
-install_empty_removes_filter_test() ->
+install_empty_still_installs_filter_test() ->
     try
         ok = geo_log_redact:install([?SECRET]),
         ok = geo_log_redact:install([]),
-        ?assertEqual([], filter_ids())
+        ?assertEqual([geo_redact], filter_ids())
     after
         geo_log_redact:uninstall()
     end.
+
+%%% Run-time secrets: patterns and the session secrets ------------------------------------
+
+-define(ADMIN_PW, <<"adm1n-pw-zz9">>).
+-define(BASIC, <<"QWRtaW46YWRtMW4tcHctenp5">>).
+-define(JWT_SECRET, <<"jwt-secret-0123456789-abcdefghijkl">>).
+-define(XP, <<"xp1_abcdefghijklmnopqrstuvwxyz012345">>).
+
+run_session(Msg) ->
+    Args = geo_log_redact:args([?ADMIN_PW, ?BASIC, ?JWT_SECRET]),
+    #{msg := Out} = geo_log_redact:filter(event(Msg), Args),
+    Out.
+
+session_secrets_redacted_test() ->
+    ?assertEqual({report, [?MASK]}, run_session({report, [?ADMIN_PW]})),
+    ?assertEqual({report, [?MASK]}, run_session({report, [?BASIC]})),
+    ?assertEqual({report, [?MASK]}, run_session({report, [?JWT_SECRET]})).
+
+basic_header_string_redacted_test() ->
+    Header = "Basic " ++ binary_to_list(?BASIC),
+    ?assertEqual({report, #{h => "Basic [REDACTED]"}}, run_session({report, #{h => Header}})),
+    HeaderBin = <<"Basic ", (?BASIC)/binary>>,
+    ?assertEqual({report, [<<"Basic [REDACTED]">>]}, run_session({report, [HeaderBin]})).
+
+xp1_password_redacted_everywhere_test() ->
+    ?assertEqual({report, #{p => ?MASK}}, run_pat({report, #{p => ?XP}})),
+    ?assertEqual({report, #{p => "[REDACTED]"}}, run_pat({report, #{p => binary_to_list(?XP)}})),
+    ?assertEqual(
+        {report, #{a => [{b, #{c => ?MASK}}]}}, run_pat({report, #{a => [{b, #{c => ?XP}}]}})
+    ),
+    ?assertEqual(
+        {report, [<<"login with [REDACTED] failed">>]},
+        run_pat({report, [<<"login with ", (?XP)/binary, " failed">>]})
+    ),
+    ?assertEqual(
+        {"pw ~s ~p", ["[REDACTED]", {x, ?MASK}]},
+        run_pat({"pw ~s ~p", [binary_to_list(?XP), {x, ?XP}]})
+    ).
+
+issued_token_redacted_test() ->
+    {Token, _} = geo_auth:issue(<<"u0123456789abcdef0123456789abcdef">>, ?JWT_SECRET, 1800000000),
+    ?assertEqual({report, #{t => ?MASK}}, run_pat({report, #{t => Token}})),
+    ?assertEqual(
+        {report, [<<"Bearer [REDACTED]">>]}, run_pat({report, [<<"Bearer ", Token/binary>>]})
+    ).
+
+short_or_partial_values_untouched_test() ->
+    Event = event({report, #{a => <<"xp1_short">>, b => <<"eyJ">>, c => <<"eyJhbGci.eyJ">>}}),
+    ?assertEqual(Event, geo_log_redact:filter(Event, geo_log_redact:args([]))).
+
+run_pat(Msg) ->
+    #{msg := Out} = geo_log_redact:filter(event(Msg), geo_log_redact:args([])),
+    Out.

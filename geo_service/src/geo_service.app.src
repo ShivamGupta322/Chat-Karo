@@ -3,7 +3,9 @@
     {vsn, "0.1.0"},
     {registered, [geo_service_sup, geo_mongo_sup, geo_mongo_topology, geo_mongo_probe, mc_pool_sup]},
     {mod, {geo_service_app, []}},
-    {applications, [kernel, stdlib, crypto, public_key, ssl, ranch, cowboy, bson, poolboy, pbkdf2]},
+    {applications, [
+        kernel, stdlib, crypto, public_key, ssl, inets, ranch, cowboy, bson, poolboy, pbkdf2
+    ]},
     %% The driver is loaded and shipped in the release, but never started: its own supervision
     %% tree (mc_super_sup) is replaced by geo_mongo_sup. See ADR-016 quirk 9.
     {included_applications, [mongodb]},

@@ -86,6 +86,13 @@ services:
       MONGO_TLS: ${MONGO_TLS:-false}
       MONGO_TLS_CA_FILE: ${MONGO_TLS_CA_FILE:-}
       MONGO_POOL_SIZE: ${MONGO_POOL_SIZE:-}
+      JWT_SECRET: ${JWT_SECRET}
+      XMPP_DOMAIN: ${XMPP_DOMAIN}
+      MONGOOSEIM_ADMIN_URL: ${MONGOOSEIM_ADMIN_URL:-http://mongooseim:5551/api/graphql}
+      MONGOOSEIM_ADMIN_USER: ${MONGOOSEIM_ADMIN_USER}
+      MONGOOSEIM_ADMIN_PASSWORD: ${MONGOOSEIM_ADMIN_PASSWORD}
+    # No depends_on mongooseim on purpose: /api/ready does not depend on the admin API, and a
+    # MongooseIM outage only makes POST /api/session answer 503. geo_service starts without it.
     depends_on:
       # Dev start ordering only: geo_service itself starts degraded and reconnects when Mongo is late.
       mongo:

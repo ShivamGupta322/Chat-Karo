@@ -46,7 +46,7 @@ Details: [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)
 Prerequisites: Docker Desktop, Node 20+, Git Bash (on Windows).
 
 ```bash
-cp .env.example .env          # then replace every "change-me" with a random value
+cp .env.example .env          # then replace every "change-me" with a random value; JWT_SECRET: openssl rand -hex 32
 docker compose up -d          # MongooseIM, PostgreSQL, MongoDB, geo_service — wait until `docker compose ps` shows 4 healthy
 curl http://127.0.0.1:8080/api/health    # geo_service liveness (first start builds the image): {"status":"ok"}
 curl http://127.0.0.1:8080/api/ready     # readiness, 200 once Mongo answers: {"status":"ready","mongo":"up"}
@@ -55,6 +55,16 @@ docker compose up -d --build geo_service
 bash infra/mongooseim/dev-seed.sh
 node tools/xmpp-smoke/serve.mjs
 ```
+
+Create a pseudonymous session (reserves the nickname, registers a random XMPP account, returns its password
+once plus a 1 h API token; `201` with `nickname`, `jid`, `xmpp_password`, `token`, `token_type`, `expires_in`):
+
+```bash
+curl.exe -X POST http://127.0.0.1:8080/api/session -H "content-type: application/json" -d "{\"nickname\":\"Zed\"}"
+```
+
+While `npm run dev` is running, the same API is reachable same-origin at `http://localhost:5173/api/...` (Vite proxies
+`/api/` to geo_service on `127.0.0.1:GEO_HTTP_PORT`). Never paste the response into issues or logs: it holds a password.
 
 geo_service integration tests (`cd geo_service && rebar3 ct`) need the dev MongoDB up on `127.0.0.1:27018`
 (override with `GEO_CT_MONGO_HOSTS`); they only use the database `chaterl_ct`. To (re-)apply the collection indexes to

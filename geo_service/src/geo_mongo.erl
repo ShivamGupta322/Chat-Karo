@@ -7,7 +7,16 @@
 %% Driver reasons and documents are never logged or returned: they may carry data.
 -module(geo_mongo).
 
--export([child_spec/1, ready/0, ping/0, update_one/4, find_one/3, classify_write/1]).
+-export([
+    child_spec/1,
+    ready/0,
+    ping/0,
+    update_one/4,
+    insert_one/2,
+    delete_one/2,
+    find_one/3,
+    classify_write/1
+]).
 -export_type([write_result/0, write_error/0]).
 
 -define(TOPOLOGY, geo_mongo_topology).
@@ -97,6 +106,38 @@ ping() ->
 update_one(Collection, Selector, Update, Opts) ->
     classify_write(
         guarded(fun() -> mongo_api:update(?TOPOLOGY, Collection, Selector, Update, Opts) end)
+    ).
+
+%% The document must carry its own _id. A duplicate key (unique index) is {write_failed, 11000}.
+-spec insert_one(binary(), map()) -> {ok, write_result()} | {error, write_error()}.
+insert_one(Collection, Doc) ->
+    Result = guarded(fun() ->
+        mongoc:transaction(
+            ?TOPOLOGY,
+            fun(#{pool := Worker}) -> mc_worker_api:insert(Worker, Collection, Doc) end,
+            #{},
+            ?CALL_TIMEOUT
+        )
+    end),
+    case Result of
+        %% The driver returns the reply together with the (id-assigned) document.
+        {{Ok, Reply}, _Doc} when is_boolean(Ok) -> classify_write({Ok, Reply});
+        Other -> classify_write(Other)
+    end.
+
+-spec delete_one(binary(), map()) -> {ok, write_result()} | {error, write_error()}.
+delete_one(Collection, Selector) ->
+    classify_write(
+        guarded(fun() ->
+            mongoc:transaction(
+                ?TOPOLOGY,
+                fun(#{pool := Worker}) ->
+                    mc_worker_api:delete_one(Worker, Collection, Selector)
+                end,
+                #{},
+                ?CALL_TIMEOUT
+            )
+        end)
     ).
 
 -spec find_one(binary(), map(), map()) -> {ok, map()} | not_found | {error, mongo_unavailable}.

@@ -55,10 +55,10 @@ Carry-forward for the next slices (from the 2a/2a+ reviews):
 ## Phase 3 — geo_service
 - [x] rebar3 app, supervision tree, sys.config, Dockerfile (slice 3a, ADR-015)
 - [x] `geohash` module with EUnit + PropEr tests (encode/decode round-trip, neighbours) (slice 3a)
-- [ ] Cowboy: `/api/health`, `/api/session`, `/api/locate` (3a done: `/api/health`)
+- [ ] Cowboy: `/api/health`, `/api/session`, `/api/locate` (3a done: `/api/health`; 3c done: `/api/session`)
 - [x] MongoDB pool + `geo_store`; `init-indexes.js` (slice 3b, ADR-016: supervised driver topology, `/api/ready`, rooms upsert)
 - [x] Slice 3b.1: reap leaked Mongo heartbeat connections on a hung server (ADR-016 quirk 10, verified live 2026-11-21)
-- [ ] MongooseIM admin API integration: register users
+- [x] MongooseIM admin API integration: register users (slice 3c, ADR-017, verified live 2026-11-21)
 - [ ] Lock down MUC: `default_room.public = false` (a public disco listing of geohash rooms would reveal
       which cells are active, a location leak) and restrict room creation to geo_service/admin
 - [ ] Client switches to `/api/locate` for room assignment
@@ -67,7 +67,7 @@ Carry-forward for the next slices (from the 2a/2a+ reviews):
 ## Phase 4 — Room lifecycle & movement
 - [ ] `geo_room` process per active cell with idle shutdown under `geo_room_sup`
 - [ ] Client hysteresis + automatic room switching + "you entered …" notice
-- [ ] `geo_rate`: token bucket + impossible-jump rejection
+- [ ] `geo_rate`: token bucket + impossible-jump rejection; `geo_rate` also limits POST /api/session per client IP (trusted-proxy XFF)
 - [ ] Ephemeral history: MAM limited to last 24 h; idle rooms TTL'd in MongoDB
 - **Demo:** walk (or drag the dev pin) across cells and watch rooms switch
 
@@ -85,6 +85,7 @@ Carry-forward for the next slices (from the 2a/2a+ reviews):
 - [ ] Production hardening: random Erlang distribution cookie (`CLUSTER_COOKIE`), TLS-only XMPP behind
       the reverse proxy, real certificates instead of the image's fake ones
 - [ ] Greeter bot for cold start
+- [ ] Session rate limit + MongooseIM `auth.max_users_per_domain` backstop before going public (unlimited sign-ups until then, ADR-017)
 - **Demo:** public URL on your resume
 
 ## Stretch

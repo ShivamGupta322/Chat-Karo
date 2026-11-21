@@ -741,3 +741,109 @@ A hung (not stopped) Mongo used to leak one heartbeat connection per ~10 s of ha
 - Round 2 rebuild (initial_call pre-check in the reaper): three pauses → 5/6/5 connections at +10 s and exactly 5 at
   +60 s each time; 4 `mongo_heartbeat_reaped` lines; RestartCount 0; two stop/start outages → 16 / 18 log lines,
   0 `start_error`, 5 connections.
+
+## ADR-017 — Pseudonymous sessions: POST /api/session, XMPP provisioning and API tokens
+**Status:** Accepted
+**Context:** Slice 3c gives the client an identity. geo_service must reserve a nickname, create an XMPP account in
+MongooseIM 6.2.1 and issue an API token, without storing anything beyond the nickname, and without a MongooseIM config
+change. Probed live on 6.2.1 by the supervisor (throwaway users deleted).
+**Decision:**
+1. **Session model.** `POST /api/session {"nickname"}` only. geo_service generates the localpart and the password and
+   returns the password exactly once. The client keeps `{jid, xmpp_password}` as its long-lived device credential; the JWT
+   lives 1 h. Renewal `POST /api/session/renew {jid, xmpp_password}` is designed now (admin `checkPassword`, body never
+   logged) and built in 3e. A lost device is a new identity; the old nickname stays reserved until the abandonment cleanup
+   (Phase 4/5); recovery is a v1 non-goal.
+   - JWT: header exactly `{"alg":"HS256","typ":"JWT"}`; claims exactly `iss=chaterl-geo`, `aud=chaterl-api`, `sub=<localpart>`,
+     `iat`, `exp=iat+3600`, `jti` (128-bit random base64url, reserved for revocation); no nickname in the token.
+   - Verification: HS256 only; `alg:none`, other algs, header keys besides alg/typ, padded or non-canonical base64url are
+     rejected; the signature is compared with `crypto:hash_equals/2` before the payload is parsed; unknown or missing claims
+     are rejected; skew 30 s (valid iff `Now < exp + 30` and `iat =< Now + 30`); `exp - iat > 3600` is rejected; a token over
+     4096 bytes is invalid.
+   - `JWT_SECRET`: 32..512 printable ASCII, no `"` or `\`, at least 10 distinct characters, not starting with `change-me`
+     (any case). On failure the app does not start and logs only the key name. The HMAC key is the raw string bytes;
+     generate with `openssl rand -hex 32`.
+2. **XMPP credentials: a real rdbms account with a random password (option a).** No MongooseIM config change; SCRAM keeps
+   working (dev alice/bob and the Phase 2 login are untouched); the JWT secret stays in geo_service; real accounts enable
+   affiliations, bans and removeUser (3f); reconnect (ADR-010) keeps a stable password. Localpart `u` + 32 lowercase hex
+   (nodeprep-safe, never the nickname); password `xp1_` + base64url of 24 random bytes (the prefix enables pattern
+   redaction). Rejected: `[auth.jwt]` (exists in 6.2.1, but the XMPP password would become a 1 h bearer token so
+   reconnect breaks after exp, the secret would be shared, the auth chain changes, and jwt users are not real accounts);
+   `mod_auth_token` (same complexity).
+3. **Nicknames.** ASCII `^[A-Za-z0-9][A-Za-z0-9_-]{1,19}$`, case preserved. Uniqueness is the existing `nickname_unique_ci`
+   index (en, strength 2): the insert is the claim, no find-then-insert. A reserved list (admin, moderator, system, nearby,
+   chaterl, geo_service, ...) is matched case-insensitively and answered 409 `nickname_taken`, indistinguishable from a
+   taken name.
+4. **profiles.** Pending: `{_id: <localpart>, nickname, state: "pending", createdAt, expiresAt: createdAt + 600 s}`; active:
+   `$set state "active"`, `$unset expiresAt`. No coordinates, IP or PII. New index `expiresAt_ttl` (`expireAfterSeconds: 0`)
+   frees an orphaned reservation's nickname within ~11 min (the TTL monitor runs every 60 s). Active profiles have no TTL
+   in 3c.
+5. **Admin client.** OTP `httpc` (`inets`), default profile, per-request options only (`timeout 5000`, `connect_timeout 2000`,
+   no redirects), precomputed `Authorization: Basic`. Constant GraphQL documents, all values as variables. The URL must be
+   `http://`. Request and response bodies are never logged: the register request carries the new password and
+   `checkPassword` echoes the plaintext password in its `message`. `/api/ready` does not depend on the admin API.
+   Redaction adds the admin password, the base64 basic credential and the JWT secret, plus patterns for `xp1_` + 32
+   characters and JWT-shaped strings.
+6. **Rate limiting deferred.** Per-IP limiting needs a trusted-proxy X-Forwarded-For policy and the stack is localhost-only
+   until Phase 6. Roadmap: Phase 4 (`geo_rate` also limits POST /api/session) and Phase 6 (session rate limit plus
+   `auth.max_users_per_domain` backstop before going public). Sign-ups are unlimited until then.
+7. **Vite proxy, no CORS.** `server.proxy` and `preview.proxy` send `/api/` to `http://127.0.0.1:<GEO_HTTP_PORT|8080>`
+   (127.0.0.1 because Node on Windows resolves localhost to ::1), `changeOrigin: false`, `xfwd: false`. The port comes from
+   `loadEnv(mode, '..', 'GEO_HTTP_PORT')`: a narrow exception to ADR-008 that loads one variable, exposes nothing to the
+   client and leaves `envPrefix` unchanged (`loadEnv(..., '')` stays banned). `VITE_API_URL=/api` is read from 3e on. No CORS
+   headers anywhere.
+8. **Request validation.** POST only (405 + `allow: POST`); content-type `application/json` (charset, if any, utf-8) else 415;
+   body cap 1024 bytes (413 by content-length before reading, or while reading chunked); invalid JSON or not an object is
+   400 `invalid_json`; anything but exactly the key `nickname` with a string value is 400 `invalid_request`; a rule violation
+   is 400 `invalid_nickname`; taken or reserved is 409; Mongo or XMPP unavailable is 503 + `retry-after: 5`; else 500
+   `internal_error`. `cache-control: no-store` on every response.
+
+**Verified facts (MongooseIM 6.2.1):** `account { registerUser(domain, username, password) { jid message } }`; success 200
+with the jid; duplicate is 200 with `errors[0].extensions.code = "exists"`; unknown domain or empty password is 200
+`"cannot_register"`; an invalid UserName is 400 `"input_coercion"`; wrong basic auth is 401 `"wrong_credentials"`; no auth is
+401 `"no_permissions"`; mixed-case usernames are lowercased; `removeUser(user: JID!)` succeeds, or answers 200 `"not_allowed"`
+for a missing user. `password.format = "scram"`: MongooseIM stores only hashes, so the plaintext exists only in our single
+response.
+
+**Rollback order and the accepted orphan case.** Flow: validate, generate, insert the pending profile (the claim), register.
+- A 409 never calls MongooseIM.
+- `exists` deletes the profile, answers 500 and NEVER removes the account (it is not ours).
+- Unavailable, rejected or bad_response: best-effort `removeUser` (a timeout can hide a success), delete the profile, answer 503
+  (unavailable) or 500.
+- Unauthorized (401): delete the profile only; the request was refused before it ran, so there is nothing to remove.
+- Activation failure: best-effort `removeUser` + delete the profile, log `session_rollback` (localpart and step only), 503.
+- If MongooseIM hangs or is slow, the register can commit after we gave up: the best-effort remove may time out too, or
+  run before the late registration commits. An orphan account is then possible and accepted. Nobody can sign in to it
+  (its random password was never returned and MongooseIM stores only SCRAM hashes), it has no profile, it still counts
+  as a user and can be removed with the admin API; the abandonment cleanup (Phase 4/5) reconciles accounts without a
+  profile. A refused connection (MongooseIM stopped) runs nothing and leaves no orphan.
+- A hung MongooseIM makes a failing request take up to ~10 s (5 s register timeout + 5 s best-effort remove).
+
+**Consequences:** new inets dependency (OTP); five required env keys; unlimited sign-ups until Phase 4/6; the client is not
+switched over until 3e.
+
+### Live evidence
+**2026-11-21, Docker Desktop on Windows, rebuilt image:**
+- The local `.env` `JWT_SECRET` already met the rules (checked without printing it). After the rebuild all four services
+  were healthy and `/api/ready` returned 200. Re-running `init-indexes.js` (`exec -T`) gave profiles indexes
+  `_id_, nickname_unique_ci, expiresAt_ttl`.
+- `POST /api/session {"nickname":"Live3c"}` → 201 with exactly `nickname, jid, xmpp_password, token, token_type,
+  expires_in`; jid matched `u[0-9a-f]{32}@chaterl.localhost`, the password matched `xp1_[A-Za-z0-9_-]{32}`; JWT header
+  `{"alg":"HS256","typ":"JWT"}`, claims exactly `iss, aud, sub, iat, exp, jti` (`chaterl-geo` / `chaterl-api`), `sub`
+  = the jid's localpart, `exp - iat = 3600`; `cache-control: no-store`. The Mongo profile had exactly `_id` (the
+  localpart), `nickname: "Live3c"`, `state: "active"`, `createdAt`.
+- The returned localpart and `xmpp_password` signed in on the dev login form (status Online). After signing out, dev
+  `alice` signed in as before.
+- `LIVE3C` → 409 `nickname_taken`; `admin` → 409 `nickname_taken`; `a` → 400 `invalid_nickname`; `text/plain` → 415.
+- Vite proxy: `http://localhost:5173/api/health` → 200 `{"status":"ok"}`; `POST http://localhost:5173/api/session` → 201
+  with the same shape; no `access-control-*` headers. Vite listens on `localhost`, which is `::1` on this machine, so
+  `127.0.0.1:5173` refuses connections; browsers use `localhost`, so this only affects hand-written curl commands.
+- `docker compose stop mongooseim`: a session request → 503 `service_unavailable` with `retry-after` after 7 s; no profile
+  left for that nickname; `/api/ready` stayed 200; geo_service RestartCount 0. After `start mongooseim` the same nickname
+  → 201.
+- Logs: 0 occurrences of `JWT_SECRET`, `MONGOOSEIM_ADMIN_PASSWORD`, the Basic credential, and each of the three returned
+  `xmpp_password` and token values (compared inside a script, values never printed); the 3 `session_created` lines carry
+  localparts only.
+- `run --rm -e JWT_SECRET=short` and `-e JWT_SECRET=<the .env.example placeholder>` → exit 1, `{bad_config,jwt_secret}`,
+  the value absent from the output.
+- Cleanup: the three test accounts were removed with `mongooseimctl account removeUser`, their profiles deleted;
+  `listUsers` shows only alice and bob (no orphan account from the MongooseIM-down attempt).

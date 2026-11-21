@@ -7,7 +7,7 @@ json(Status, Body, Req) ->
     cowboy_req:reply(Status, headers(), json:encode(Body), Req).
 
 %% Same as json/3 but keeps the key order of the list (map encoding sorts the keys).
--spec json_ordered(cowboy:http_status(), [{binary(), binary()}], cowboy_req:req()) ->
+-spec json_ordered(cowboy:http_status(), [{binary(), binary() | integer()}], cowboy_req:req()) ->
     cowboy_req:req().
 json_ordered(Status, Pairs, Req) ->
     Body = json:encode_key_value_list(Pairs, fun json:encode_value/2),

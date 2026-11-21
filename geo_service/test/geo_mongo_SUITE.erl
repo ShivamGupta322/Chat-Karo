@@ -13,6 +13,9 @@
     touch_room_create_then_update/1,
     same_cell_two_points_one_doc/1,
     get_room_missing/1,
+    insert_one_and_delete_one/1,
+    profile_nickname_unique_ci/1,
+    profile_lifecycle/1,
     concurrent_touch_same_new_cell/1,
     topology_restart/1,
     pool_kill_does_not_leak/1,
@@ -44,6 +47,9 @@ groups() ->
             touch_room_create_then_update,
             same_cell_two_points_one_doc,
             get_room_missing,
+            insert_one_and_delete_one,
+            profile_nickname_unique_ci,
+            profile_lifecycle,
             concurrent_touch_same_new_cell,
             topology_restart,
             pool_kill_does_not_leak
@@ -76,6 +82,24 @@ init_per_suite(Config) ->
                 ]
             }),
             true = (Ok == 1),
+            %% The profiles indexes, as in infra/mongo/init-indexes.js.
+            {true, #{<<"ok">> := Ok2}} = run_command(#{
+                <<"createIndexes">> => <<"profiles">>,
+                <<"indexes">> => [
+                    #{
+                        <<"key">> => #{<<"nickname">> => 1},
+                        <<"name">> => <<"nickname_unique_ci">>,
+                        <<"unique">> => true,
+                        <<"collation">> => #{<<"locale">> => <<"en">>, <<"strength">> => 2}
+                    },
+                    #{
+                        <<"key">> => #{<<"expiresAt">> => 1},
+                        <<"name">> => <<"expiresAt_ttl">>,
+                        <<"expireAfterSeconds">> => 0
+                    }
+                ]
+            }),
+            true = (Ok2 == 1),
             Config
     end.
 
@@ -93,7 +117,18 @@ init_indexes_drift_guard(_Config) ->
     Text = binary_to_list(Bin),
     true = string:find(Text, "center_2dsphere") =/= nomatch,
     true = string:find(Text, "lastActiveAt_ttl") =/= nomatch,
-    true = string:find(Text, "expireAfterSeconds: 7 * 24 * 3600") =/= nomatch.
+    true = string:find(Text, "expireAfterSeconds: 7 * 24 * 3600") =/= nomatch,
+    %% profiles: case-insensitive unique nickname (en, strength 2) and the pending-reservation TTL.
+    Flat = re:replace(Text, "\\s+", " ", [global, {return, list}]),
+    true = string:find(Flat, "nickname_unique_ci") =/= nomatch,
+    true =
+        string:find(
+            Flat,
+            "unique: true, collation: { locale: \"en\", strength: 2 }"
+        ) =/= nomatch,
+    true =
+        string:find(Flat, "{ expiresAt: 1 }, { name: \"expiresAt_ttl\", expireAfterSeconds: 0 }") =/=
+            nomatch.
 
 ready_200(_Config) ->
     {ok, {{_, 200, _}, _, Body}} = httpc_get("/api/ready"),
@@ -184,6 +219,51 @@ concurrent_touch_same_new_cell(_Config) ->
     19 = length([R || R = {ok, updated} <- Results]),
     N = length([R || {ok, _} = R <- Results]),
     1 = count_rooms(geo_cell:room_id(Cell)).
+
+insert_one_and_delete_one(_Config) ->
+    Doc = #{<<"_id">> => <<"ct_insert_1">>, <<"nickname">> => <<"CtInsertOne">>},
+    {ok, #{matched := 1}} = geo_mongo:insert_one(<<"profiles">>, Doc),
+    %% Same _id again, and the same nickname in another case: both are duplicate-key errors.
+    {error, {write_failed, 11000}} = geo_mongo:insert_one(<<"profiles">>, Doc),
+    {error, {write_failed, 11000}} =
+        geo_mongo:insert_one(
+            <<"profiles">>, #{<<"_id">> => <<"ct_insert_2">>, <<"nickname">> => <<"ctinsertone">>}
+        ),
+    {ok, #{matched := 1}} = geo_mongo:delete_one(<<"profiles">>, #{<<"_id">> => <<"ct_insert_1">>}),
+    {ok, #{matched := 0}} = geo_mongo:delete_one(<<"profiles">>, #{<<"_id">> => <<"ct_insert_1">>}),
+    not_found = geo_mongo:find_one(<<"profiles">>, #{<<"_id">> => <<"ct_insert_1">>}, #{}).
+
+profile_nickname_unique_ci(_Config) ->
+    Now = os:timestamp(),
+    ok = geo_store:create_pending_profile(<<"ct_prof_a">>, <<"CtZed">>, Now),
+    {error, nickname_taken} = geo_store:create_pending_profile(<<"ct_prof_b">>, <<"ctzed">>, Now),
+    {error, nickname_taken} = geo_store:create_pending_profile(<<"ct_prof_c">>, <<"CTZED">>, Now),
+    not_found = geo_store:get_profile(<<"ct_prof_b">>),
+    ok = geo_store:delete_profile(<<"ct_prof_a">>),
+    %% The name is free again.
+    ok = geo_store:create_pending_profile(<<"ct_prof_b">>, <<"ctzed">>, Now),
+    ok = geo_store:delete_profile(<<"ct_prof_b">>).
+
+profile_lifecycle(_Config) ->
+    Now = os:timestamp(),
+    ok = geo_store:create_pending_profile(<<"ct_prof_l">>, <<"CtLife">>, Now),
+    {ok, Doc} = geo_mongo:find_one(<<"profiles">>, #{<<"_id">> => <<"ct_prof_l">>}, #{}),
+    [<<"_id">>, <<"createdAt">>, <<"expiresAt">>, <<"nickname">>, <<"state">>] =
+        lists:sort(maps:keys(Doc)),
+    {ok, #{state := pending, nickname := <<"CtLife">>, id := <<"ct_prof_l">>}} =
+        geo_store:get_profile(<<"ct_prof_l">>),
+    %% The TTL field is a BSON Date 600 s after creation (the TTL index needs a Date).
+    {_, _, _} = ExpiresAt = maps:get(<<"expiresAt">>, Doc),
+    600000 = ms(ExpiresAt) - ms(maps:get(<<"createdAt">>, Doc)),
+    ok = geo_store:activate_profile(<<"ct_prof_l">>),
+    {ok, Active} = geo_mongo:find_one(<<"profiles">>, #{<<"_id">> => <<"ct_prof_l">>}, #{}),
+    [<<"_id">>, <<"createdAt">>, <<"nickname">>, <<"state">>] = lists:sort(maps:keys(Active)),
+    <<"active">> = maps:get(<<"state">>, Active),
+    {ok, #{state := active}} = geo_store:get_profile(<<"ct_prof_l">>),
+    ok = geo_store:delete_profile(<<"ct_prof_l">>),
+    ok = geo_store:delete_profile(<<"ct_prof_l">>),
+    {error, not_found} = geo_store:activate_profile(<<"ct_prof_l">>),
+    not_found = geo_store:get_profile(<<"ct_prof_l">>).
 
 topology_restart(_Config) ->
     Old = whereis(geo_mongo_topology),
@@ -406,7 +486,12 @@ start_app(Hosts, User, Password) ->
             {mongo_auth_source, ""},
             {mongo_tls, ""},
             {mongo_tls_ca_file, ""},
-            {mongo_pool_size, ""}
+            {mongo_pool_size, ""},
+            {jwt_secret, "ct-jwt-secret-0123456789-abcdefghijklmnop"},
+            {xmpp_domain, "chaterl.localhost"},
+            {mim_admin_url, "http://127.0.0.1:1/api/graphql"},
+            {mim_admin_user, "admin"},
+            {mim_admin_password, "ct-admin-password"}
         ]
     ),
     {ok, _} = application:ensure_all_started(geo_service),
