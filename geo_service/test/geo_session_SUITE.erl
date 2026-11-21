@@ -38,6 +38,7 @@
     renew_xmpp_unauthorized_500/1,
     renew_garbage_500/1,
     renew_crash_is_sanitised/1,
+    session_crash_is_sanitised/1,
     renew_mongo_unavailable_503/1,
     logs_contain_no_secrets/1
 ]).
@@ -74,6 +75,7 @@ all() ->
         renew_xmpp_unauthorized_500,
         renew_garbage_500,
         renew_crash_is_sanitised,
+        session_crash_is_sanitised,
         {group, mongo_down},
         logs_contain_no_secrets
     ].
@@ -534,6 +536,31 @@ renew_crash_is_sanitised(Config) ->
     timer:sleep(300),
     Events = lists:nthtail(?config(log_mark, Config), geo_fake_mim:log_events()),
     [Report] = [R || #{msg := {report, #{event := renew_crashed} = R}} <- Events],
+    [class, event, reason, where] = lists:sort(maps:keys(Report)),
+    #{class := error, reason := badmatch, where := Where} = Report,
+    true = lists:all(
+        fun({M, F, A, _}) -> is_atom(M) andalso is_atom(F) andalso is_integer(A) end, Where
+    ),
+    [] = [E || #{msg := {report, #{label := {proc_lib, crash}}}} = E <- Events],
+    Texts = [lists:flatten(io_lib:format("~0p", [E])) || E <- Events],
+    lists:foreach(fun(T) -> nomatch = string:find(T, "had its request process") end, Texts),
+    lists:foreach(fun(T) -> nomatch = string:find(T, binary_to_list(Password)) end, Texts).
+
+%% Same guarantee for POST /api/session: a crash after decoding whose reason carries a freshly
+%% generated password answers 500 and logs only the sanitised summary.
+session_crash_is_sanitised(Config) ->
+    Password = geo_session:new_password(),
+    remember([Password]),
+    ok = meck:new(geo_session, [passthrough]),
+    ok = meck:expect(geo_session, create, fun(_N, _C) ->
+        meck:exception(error, {badmatch, Password})
+    end),
+    {500, _, B} = post_json(#{<<"nickname">> => nick(Config, "Crash")}),
+    #{<<"error">> := <<"internal_error">>} = json:decode(B),
+    1 = meck:num_calls(geo_session, create, '_'),
+    timer:sleep(300),
+    Events = lists:nthtail(?config(log_mark, Config), geo_fake_mim:log_events()),
+    [Report] = [R || #{msg := {report, #{event := session_crashed} = R}} <- Events],
     [class, event, reason, where] = lists:sort(maps:keys(Report)),
     #{class := error, reason := badmatch, where := Where} = Report,
     true = lists:all(

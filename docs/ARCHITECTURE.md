@@ -164,6 +164,7 @@ decoding runs in one try/catch that logs only a sanitised summary, because the b
 | `geo_http` | Embedded ranch listener and routes |
 | `geo_http_reply` | JSON replies and security headers |
 | `geo_http_*` | Cowboy handlers: `health`, `ready`, `not_found`, `session`, `session_renew`, `locate`, and later `places`, `report` |
+| `geo_http_session` | `POST /api/session`: body read, then one guarded section (nickname check, account creation, reply); logs only `session_crashed` (sanitised summary); never the body or the generated password |
 | `geo_http_session_renew` | `POST /api/session/renew`: body read, then one guarded section (credential check, token, reply); logs only `renew_crashed` (sanitised summary); never the body |
 | `geo_http_locate` | `POST /api/locate`: auth, body read, then one guarded section (cell, rooms upsert, reply); logs only `locate_crashed` / `locate_store_failed` |
 | `geo_http_auth` | Pure Bearer-header parsing and token check (never cowlib, never logs) |

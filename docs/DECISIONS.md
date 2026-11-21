@@ -1031,8 +1031,10 @@ passwords), and the shape check plus the profile-first order keeps junk away fro
 Phase 4 (`geo_rate`) and Phase 6, accepted while the service is localhost-only. An unknown localpart is answered faster than
 a wrong password (timing oracle), accepted because localparts are 128-bit random. There is no revocation: the old token stays
 valid until it expires (ADR-017). The handler blocks its request process for at most the admin client timeout (5 s).
-**Known follow-up:** `geo_http_session` (POST /api/session) holds a generated password too and does not yet have the guarded
-try/catch; retrofit it the same way.
+**Follow-up (done, 2026-11-21):** `geo_http_session` (POST /api/session) holds a generated password too, so it now has the
+same guarded try/catch: everything after the body is decoded runs in one section that logs only `session_crashed`
+(geo_crash:summary/3). CT `session_crash_is_sanitised` covers it; with the guard disabled (the crash handler re-raising)
+that case fails, so the test is not vacuous.
 
 ### Live evidence
 **2026-11-21, Docker Desktop on Windows, rebuilt image** (credentials and tokens kept in files, never printed):
