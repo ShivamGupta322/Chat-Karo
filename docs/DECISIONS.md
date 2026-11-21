@@ -38,7 +38,7 @@ archive rows in PostgreSQL. MongoDB `rooms.lastActiveAt` and `reports.createdAt`
 **Consequences:** Simple; no per-message timers.
 
 ## ADR-005 — Server-side room assignment; coordinates never stored
-**Status:** Accepted
+**Status:** Accepted. Amended by ADR-019 D3 (lands in 3e-3): the client sends its precision-7 cell centre, not its raw fix.
 **Context:** Computing the geohash on the client is most private but gives no spoofing control.
 **Decision:** Client sends coordinates to geo_service over HTTPS; geo_service validates, rate-limits,
 computes the cell, then discards coordinates. Only the last cell centre + timestamp is kept in ETS
@@ -950,3 +950,104 @@ printed; request bodies sent from files):
   before); 0 crash reports. In the running node (`bin/geo_service eval`), `logger:error(#{<<255>> => 1, <<"LAT">> => 1.5})`
   printed `LAT` as `[REDACTED]` and `geo_redact` stayed among the primary filters (before round 3 logger removed it and every
   later line went out unredacted); a following line with an `xp1_` test string came out `[REDACTED]`.
+
+## ADR-019 — Session renewal (POST /api/session/renew) and the client switch design
+**Status:** Accepted (server part, slice 3e-1). Client decisions D1-D7 land in slices 3e-2 and 3e-3; D3 was confirmed by the user on 2026-11-21.
+**Context:** A returning device holds `{jid, xmpp_password}` (ADR-017) but its 1 h API token is gone. It needs a way to get a
+fresh token without a second identity, an email or a cookie. The request body carries a live credential, so the handler
+must not let it reach a log or a crash report (ADR-018 section 4b reasoning). Probed live on MongooseIM 6.2.1 by the
+supervisor (one throwaway user, created and deleted; no credentials printed).
+**Decision (server, built in 3e-1):**
+1. **Contract.** `POST /api/session/renew`, `content-type: application/json`, body at most 1024 bytes, exactly
+   `{"jid": string, "xmpp_password": string}` (any other shape is 400 `invalid_request`). `200 {"nickname","token",
+   "token_type":"Bearer","expires_in":3600}` in that order. 400 `invalid_json` / `invalid_request`; 401
+   `invalid_credentials`; 405 + `allow: POST`; 413; 415; 503 `service_unavailable` + `retry-after: 5` (Mongo or MongooseIM
+   unavailable or timed out); 500 `internal_error` (admin 401 or unparsable answer, a bad profile document, a crash).
+   `cache-control: no-store` on every reply.
+2. **One 401.** A malformed jid or password, an unknown, pending or deleted profile, a wrong password and an unknown XMPP
+   account all return the same constant body `{"error":"invalid_credentials","message":"These credentials are not valid."}`.
+   There is no `www-authenticate` header: the credentials travel in the body, not in an HTTP auth scheme.
+3. **Order.** `geo_session:parse_credentials/3` (total; jid exactly `u` + 32 lowercase hex + `@` + the XMPP domain, no
+   resource, no case folding; password exactly `xp1_` + 32 base64url characters), then `geo_store:get_profile/1`
+   (an ACTIVE profile is required), and only then the MongooseIM admin `checkPassword`. Junk and deleted accounts therefore
+   never cost a SCRAM check. The nickname comes from the profile. The token is `geo_auth:issue/3` (1 h, `sub` = localpart).
+4. **Verified admin facts (6.2.1).** Query
+   `query CheckPassword($user: JID!, $password: String!) { account { checkPassword(user: $user, password: $password) { correct } } }`:
+   the right password is 200 `{"correct":true}`; a wrong or empty password is 200 `{"correct":false}`; an unknown user (any
+   domain) is 200 with `errors[0].extensions.code = "user_does_not_exist"` and `data.account.checkPassword = null`; an
+   unparsable JID is 400 `input_coercion`. Selecting only `{ correct }` removes the echoed password from the success and wrong
+   bodies, but the `user_does_not_exist` error message STILL echoes the password. So no admin body is ever logged.
+   `geo_xmpp_admin:parse_check_password/2` maps true to `ok`, false and `user_does_not_exist` to `{error, invalid}`, 401 to
+   `unauthorized`, 5xx and transport failures to `unavailable`, everything else to `bad_response`.
+5. **Crash safety.** `geo_http_session_renew` runs everything after decoding inside one try/catch (like `geo_http_locate`):
+   a crash replies 500 and logs only `renew_crashed` with `geo_crash:summary/3` (class, atom reason, frame arities). The read
+   phase is outside the try, there is no `terminate/3`, the reply is the last expression of the try, and the password is never
+   matched in a function head outside the try. `geo_log_redact`'s `xp1_` pattern is only the backstop. Nothing is logged per
+   request on success or 4xx; the only other events are the existing `xmpp_admin_unauthorized` / `xmpp_admin_bad_response`
+   (status only).
+**Decision (client, lands in 3e-2 / 3e-3):**
+- **D1 Device credential.** localStorage key `nearby.identity.v1`, JSON `{"v":1,"jid","xmppPassword","nickname"}`, validated
+  on read (malformed means absent). IndexedDB has the same XSS exposure with more complexity; sessionStorage loses the
+  identity on tab close; WebCrypto cannot help (SASL needs the plaintext). XSS exposure is accepted for a portfolio project
+  (no third-party scripts, React escaping, no `dangerouslySetInnerHTML`, CSP in Phase 6). The JWT is memory-only. If a write
+  fails the credential stays in memory and the UI says "This name won't be remembered on this device." Copy: "Nearby gives you
+  a name on this device only. There's no email or password. If you clear this browser's data or switch devices, you'll start
+  again with a new name." The credential is never deleted without an explicit user action (auth-failed or a renew 401 offers
+  "Try again" / "Start over"). Sign out is an XMPP disconnect plus the Welcome page with "Continue as {nickname}" / "Start over
+  with a new name"; Start over asks for confirmation ("Your current name can't be recovered."). No server-side `removeUser` in 3e.
+- **D2 Token lifecycle** (`web/src/api/`, injected clock, timers and fetch). `expiresAt = now + expires_in*1000`; proactive
+  renew at 80% plus a lazy check before a locate (renew if there is no token or less than 60 s left); single-flight renew; a
+  locate 401 gets one renew and one retry, a second 401 is an error state; a renew 401 `invalid_credentials` is
+  identity-invalid (offer Start over, nothing wiped); renew 503, timeout or network error keeps XMPP and retries after
+  max(retry-after, backoff 5 s up to 30 s), none while offline, retry on `online`. Fetch timeouts: `/api/session` 15 s, renew
+  15 s, locate 10 s. After onboarding the 201 token is used; on reload the XMPP connect and the renew start in parallel.
+- **D3 Locate flow (confirmed by the user, 2026-11-21).** Send the CENTRE of the locally computed precision-7 cell, not the raw fix,
+  and omit `accuracy`; the server answer is identical and the raw fix never leaves the device. This amends the
+  ADR-005 wording ("the client sends its cell centre", not its coordinates). Phase 4 still works: hysteresis runs in the
+  browser on the raw fix, and the impossible-jump check uses cell centres; Phase 5 place matching can run client-side if
+  needed. Reversible: the server accepts any valid point. The Phase 4 jump threshold must allow for one p7 cell diagonal (about 215 m) of
+  quantisation, so two quick legitimate cell changes never look like an impossible speed. The local geohash stays (dev map,
+  de-duplication, snapping). Locate only on the ADR-013 section 3 room-change triggers plus a retry after an error; no `range`
+  key. The response is validated: extra keys tolerated; `cell`, `precision` in {5,6,7}, `range` and `room_jid` matching
+  `^g(5|6|7)_[0-9b-hjkmnp-z]{5,7}@<mucDomain>$` are required; precision equals the cell length equals the room prefix; for
+  block the cell equals the local cell; a mismatch is bad-response and nothing is joined. The previous room is kept until
+  the new assignment arrives; desired room is null on location loss or a locate failure. The MUC nick is the profile nickname.
+  States: assigning, unavailable, offline, identity-invalid, bad-response.
+- **D4 Boundaries.** `src/api/` is a leaf. The locate value is importable only from `src/geo/**`, `src/main.tsx` and tests
+  (`**/api/locate`). `no-restricted-globals` for `fetch`, `XMLHttpRequest`, `navigator.sendBeacon` everywhere except
+  `src/api/**`. localStorage/sessionStorage only in `src/api/deviceCredential.ts`. `xmpp/` also gets `**/api`. Guards are proven
+  by lint fixture tests.
+- **D5 Dev login.** Remove `pages/DevLogin.tsx`, `components/LoginForm.tsx` and `ui/addresses.ts` `toRoomJid`/`roomLabel` in 3e-2
+  (alice and bob stay for `tools/xmpp-smoke` and the lobby). The two-window demo uses a DEV-only
+  `?identity=<[a-z0-9]{1,16}>` storage slot (literal `import.meta.env.DEV`) or a private window.
+- **D6 Onboarding.** `pages/Welcome.tsx`: a labelled nickname input mirroring `^[A-Za-z0-9][A-Za-z0-9_-]{1,19}$`,
+  `aria-invalid` + `aria-describedby`, `role=alert` for submit errors. 400 shows the rule; 409 "That name is taken. Try
+  another."; 503, timeout or network error "Nearby can't create names right now. Try again in a few seconds."; 500 a generic
+  message. Busy label "Creating...". The credential is stored before the XMPP connect. Tokens and `ui/text.ts` only.
+- **D7.** `VITE_API_URL` is optional, default `/api`; a same-origin path only (one leading `/`, no `//`, query, hash or
+  whitespace); read in `config.ts` and passed explicitly in `main.tsx`.
+**Consequences:** Renew is a password oracle and costs one SCRAM check per call. Brute force is infeasible (192-bit
+passwords), and the shape check plus the profile-first order keeps junk away from MongooseIM; there is no rate limit until
+Phase 4 (`geo_rate`) and Phase 6, accepted while the service is localhost-only. An unknown localpart is answered faster than
+a wrong password (timing oracle), accepted because localparts are 128-bit random. There is no revocation: the old token stays
+valid until it expires (ADR-017). The handler blocks its request process for at most the admin client timeout (5 s).
+**Known follow-up:** `geo_http_session` (POST /api/session) holds a generated password too and does not yet have the guarded
+try/catch; retrofit it the same way.
+
+### Live evidence
+**2026-11-21, Docker Desktop on Windows, rebuilt image** (credentials and tokens kept in files, never printed):
+- All four services healthy, `/api/ready` 200. A fresh `POST /api/session` → its jid and password sent to
+  `POST /api/session/renew` → 200 with exactly `nickname, token, token_type, expires_in` in that order, `cache-control:
+  no-store`; the JWT has exactly the six claims, `exp - iat = 3600`, `sub` = the jid's localpart, nickname "Live3e1".
+  The renewed token → `POST /api/locate` 200 (`g7_u4pruyd`).
+- Through the Vite proxy (`http://localhost:5173/api/session/renew`) → the same 200; no `access-control-*` headers.
+- A wrong `xp1_` password and alice's jid → 401 `{"error":"invalid_credentials","message":"These credentials are not
+  valid."}` (one constant body); GET → 405 `allow: POST`; `text/plain` → 415.
+- `docker compose stop mongooseim` → renew 503 `service_unavailable` + `retry-after: 5` in 4 s, `/api/ready` stayed 200;
+  after `start mongooseim` → 200. `docker compose stop mongo` → renew 503 + `retry-after: 5`. geo_service RestartCount 0.
+- Logs (scanned in a script): 0 occurrences of the six test secrets (the real and a wrong password, the issued and renewed
+  tokens), of `is correct`, `is incorrect` and `does not exist`; 0 `renew_crashed`.
+- Cleanup: the test account removed with `mongooseimctl account removeUser`, its profile and the test room deleted;
+  `listUsers` shows only alice and bob.
+- (A first run tested the stale image, every renew → 404, because the rebuild had not taken effect; the run above is on
+  the rebuilt image.)

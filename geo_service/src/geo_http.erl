@@ -25,6 +25,7 @@ dispatch(#{jwt_secret := JwtSecret, muc_domain := MucDomain} = SessionCfg) ->
             {"/api/health", geo_http_health, []},
             {"/api/ready", geo_http_ready, []},
             {"/api/session", geo_http_session, SessionCfg},
+            {"/api/session/renew", geo_http_session_renew, SessionCfg},
             {"/api/locate", geo_http_locate, LocateCfg},
             {'_', geo_http_not_found, []}
         ]}

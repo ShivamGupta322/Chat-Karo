@@ -1,12 +1,21 @@
-%% Client for the MongooseIM 6.2.1 admin GraphQL API (account.registerUser / removeUser).
+%% Client for the MongooseIM 6.2.1 admin GraphQL API (account.registerUser / removeUser /
+%% checkPassword).
 %% The GraphQL documents are constants; every value travels in `variables`. Request and response
 %% bodies are never logged: the register request carries the new XMPP password, and the admin
-%% API echoes passwords in some responses (checkPassword). See ADR-017.
+%% API echoes passwords in some responses (the checkPassword user_does_not_exist error message
+%% repeats the password, so even an error body is never logged). See ADR-017 and ADR-019.
 -module(geo_xmpp_admin).
 
--export([register_user/4, remove_user/3]).
--export([register_request/4, remove_request/3, parse_register/3, parse_remove/3]).
--export_type([admin/0, reg_error/0]).
+-export([register_user/4, remove_user/3, check_password/3]).
+-export([
+    register_request/4,
+    remove_request/3,
+    check_password_request/3,
+    parse_register/3,
+    parse_remove/3,
+    parse_check_password/2
+]).
+-export_type([admin/0, reg_error/0, check_error/0]).
 
 -define(REGISTER_QUERY, <<
     "mutation RegisterUser($domain: DomainName!, $username: UserName, $password: String!) "
@@ -16,6 +25,12 @@
 -define(REMOVE_QUERY,
     <<"mutation RemoveUser($user: JID!) { account { removeUser(user: $user) { jid } } }">>
 ).
+%% Selects ONLY `correct`: that keeps the echoed password out of the success and wrong-password
+%% bodies (MongooseIM 6.2.1 echoes it in the default `message` field).
+-define(CHECK_QUERY, <<
+    "query CheckPassword($user: JID!, $password: String!) "
+    "{ account { checkPassword(user: $user, password: $password) { correct } } }"
+>>).
 -define(TIMEOUT, 5000).
 -define(CONNECT_TIMEOUT, 2000).
 
@@ -26,6 +41,7 @@
     password := binary()
 }.
 -type reg_error() :: exists | unavailable | unauthorized | rejected | bad_response.
+-type check_error() :: invalid | unavailable | unauthorized | bad_response.
 -type request() :: {string(), [{string(), string()}], string(), binary()}.
 
 -spec register_user(admin(), Domain :: binary(), Localpart :: binary(), Password :: binary()) ->
@@ -46,6 +62,18 @@ remove_user(Admin, Domain, Localpart) ->
     log_failure(Result, Sent),
     Result.
 
+%% ok: the password is right. {error, invalid}: wrong password or no such account.
+-spec check_password(admin(), Jid :: binary(), Password :: binary()) -> ok | {error, check_error()}.
+check_password(Admin, Jid, Password) ->
+    Sent = send(check_password_request(Admin, Jid, Password)),
+    Result =
+        case Sent of
+            {ok, {Status, Body}} -> parse_check_password(Status, Body);
+            error -> {error, unavailable}
+        end,
+    log_failure(Result, Sent),
+    Result.
+
 -spec register_request(admin(), binary(), binary(), binary()) -> request().
 register_request(Admin, Domain, Localpart, Password) ->
     Variables = #{
@@ -58,6 +86,10 @@ register_request(Admin, Domain, Localpart, Password) ->
 -spec remove_request(admin(), binary(), binary()) -> request().
 remove_request(Admin, Domain, Localpart) ->
     request(Admin, ?REMOVE_QUERY, #{<<"user">> => jid(Localpart, Domain)}).
+
+-spec check_password_request(admin(), binary(), binary()) -> request().
+check_password_request(Admin, Jid, Password) ->
+    request(Admin, ?CHECK_QUERY, #{<<"user">> => Jid, <<"password">> => Password}).
 
 -spec request(admin(), binary(), map()) -> request().
 request(#{url := Url, authorization := Authorization}, Query, Variables) ->
@@ -83,6 +115,33 @@ parse_register(200, Body, Jid) ->
             {error, bad_response}
     end;
 parse_register(Status, _Body, _Jid) ->
+    status_error(Status).
+
+%% 200 correct true -> ok; correct false -> invalid; errors[0].extensions.code
+%% "user_does_not_exist" -> invalid; any other 200 (other code, non-boolean correct, not JSON) ->
+%% bad_response; 401 -> unauthorized; 5xx -> unavailable; anything else -> bad_response.
+-spec parse_check_password(Status :: non_neg_integer(), Body :: binary()) ->
+    ok | {error, check_error()}.
+parse_check_password(200, Body) ->
+    case decode(Body) of
+        {ok, #{
+            <<"data">> := #{
+                <<"account">> := #{<<"checkPassword">> := #{<<"correct">> := Correct}}
+            }
+        }} when is_boolean(Correct) ->
+            case Correct of
+                true -> ok;
+                false -> {error, invalid}
+            end;
+        {ok, Decoded} ->
+            case error_code(Decoded) of
+                <<"user_does_not_exist">> -> {error, invalid};
+                _ -> {error, bad_response}
+            end;
+        error ->
+            {error, bad_response}
+    end;
+parse_check_password(Status, _Body) ->
     status_error(Status).
 
 %% ok -> ok; errors[0].extensions.code "not_allowed" (no such user) -> not_found.

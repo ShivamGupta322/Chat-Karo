@@ -10,11 +10,16 @@
 %%   http503       every request is 503
 %%   slow          register answers ok after 7 s (longer than the client timeout)
 %%   garbage       every request is 200 with a non-JSON body
+%%   slow_check    checkPassword answers after 7 s (everything else as ok)
+%% A successful register (modes ok, exists never registers) stores {{pw, Jid}, Password} so
+%% that checkPassword can answer: equal -> correct true, different -> correct false, no entry ->
+%% 200 user_does_not_exist whose message echoes the password (the shape probed live, which is
+%% why nothing may log an admin body). forget_user/1 deletes the entry.
 -module(geo_fake_mim).
 -behaviour(cowboy_handler).
 
 -export([start/0, stop/0, port/0, stop_listener/0, start_listener/1]).
--export([set_mode/1, reset/0, calls/0]).
+-export([set_mode/1, reset/0, calls/0, forget_user/1]).
 -export([put_secret/1, secrets/0, log_event/1, log_events/0]).
 -export([init/2]).
 
@@ -68,7 +73,7 @@ stop_listener() ->
 -spec port() -> inet:port_number().
 port() -> ranch:get_port(?LISTENER).
 
--spec set_mode(ok | exists | unauthorized | http503 | slow | garbage) -> ok.
+-spec set_mode(ok | exists | unauthorized | http503 | slow | slow_check | garbage) -> ok.
 set_mode(Mode) ->
     true = ets:insert(?TABLE, {mode, Mode}),
     ok.
@@ -79,9 +84,15 @@ reset() ->
     ets:match_delete(?TABLE, {{call, '_'}, '_'}),
     ok.
 
--spec calls() -> [#{op := register | remove | other, auth := term(), vars := map()}].
+-spec calls() -> [#{op := register | remove | check | other, auth := term(), vars := map()}].
 calls() ->
     [Call || {{call, _}, Call} <- ets:tab2list(?TABLE)].
+
+%% The account no longer exists in the fake.
+-spec forget_user(Jid :: binary()) -> ok.
+forget_user(Jid) ->
+    true = ets:delete(?TABLE, {pw, Jid}),
+    ok.
 
 -spec put_secret(binary()) -> ok.
 put_secret(Secret) ->
@@ -122,9 +133,16 @@ init(Req0, State) ->
     {ok, Req, State}.
 
 operation(Query) ->
-    case {binary:match(Query, <<"registerUser">>), binary:match(Query, <<"removeUser">>)} of
-        {{_, _}, nomatch} -> register;
-        {nomatch, {_, _}} -> remove;
+    case
+        {
+            binary:match(Query, <<"registerUser">>),
+            binary:match(Query, <<"removeUser">>),
+            binary:match(Query, <<"checkPassword">>)
+        }
+    of
+        {{_, _}, nomatch, nomatch} -> register;
+        {nomatch, {_, _}, nomatch} -> remove;
+        {nomatch, nomatch, {_, _}} -> check;
         _ -> other
     end.
 
@@ -139,14 +157,29 @@ respond(exists, register, _Vars, Req) ->
 respond(slow, register, Vars, Req) ->
     timer:sleep(?SLOW_MS),
     respond(ok, register, Vars, Req);
-respond(_Mode, register, #{<<"username">> := User, <<"domain">> := Domain}, Req) ->
+respond(slow_check, check, Vars, Req) ->
+    timer:sleep(?SLOW_MS),
+    respond(ok, check, Vars, Req);
+respond(Mode, check, #{<<"user">> := Jid, <<"password">> := Password}, Req) when
+    Mode =:= ok; Mode =:= exists; Mode =:= slow
+->
+    case ets:lookup(?TABLE, {pw, Jid}) of
+        [{_, Password}] -> reply(200, check_ok(true), Req);
+        [{_, _Other}] -> reply(200, check_ok(false), Req);
+        [] -> reply(200, check_missing(Jid, Password), Req)
+    end;
+respond(
+    _Mode, register, #{<<"username">> := User, <<"domain">> := Domain, <<"password">> := Pw}, Req
+) ->
+    Jid = jid(User, Domain),
+    true = ets:insert(?TABLE, {{pw, Jid}, Pw}),
     reply(
         200,
         #{
             <<"data">> => #{
                 <<"account">> => #{
                     <<"registerUser">> => #{
-                        <<"jid">> => jid(User, Domain), <<"message">> => <<"User registered">>
+                        <<"jid">> => Jid, <<"message">> => <<"User registered">>
                     }
                 }
             }
@@ -161,6 +194,22 @@ respond(_Mode, remove, #{<<"user">> := Jid}, Req) ->
     );
 respond(_Mode, _Op, _Vars, Req) ->
     cowboy_req:reply(400, #{}, <<"unexpected">>, Req).
+
+check_ok(Correct) ->
+    #{<<"data">> => #{<<"account">> => #{<<"checkPassword">> => #{<<"correct">> => Correct}}}}.
+
+%% 200 with an error whose message echoes the password, as MongooseIM 6.2.1 does.
+check_missing(Jid, Password) ->
+    #{
+        <<"errors">> => [
+            #{
+                <<"message">> =>
+                    <<"Password ", Password/binary, " for user ", Jid/binary, " does not exist">>,
+                <<"extensions">> => #{<<"code">> => <<"user_does_not_exist">>}
+            }
+        ],
+        <<"data">> => #{<<"account">> => #{<<"checkPassword">> => null}}
+    }.
 
 %% MongooseIM lowercases the localpart.
 jid(User, Domain) ->

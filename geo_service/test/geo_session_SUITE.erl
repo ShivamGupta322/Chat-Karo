@@ -1,4 +1,4 @@
-%% POST /api/session end to end: the real application, a real MongoDB (database chaterl_ct only)
+%% POST /api/session and POST /api/session/renew end to end: the real application, a real MongoDB (database chaterl_ct only)
 %% and a fake MongooseIM admin API (geo_fake_mim). The suite is skipped, loudly, when Mongo is
 %% not reachable at GEO_CT_MONGO_HOSTS (default 127.0.0.1:27018).
 -module(geo_session_SUITE).
@@ -26,6 +26,19 @@
     xmpp_unauthorized_500/1,
     xmpp_exists_500_no_remove/1,
     mongo_unavailable_503/1,
+    renew_200/1,
+    renew_wrong_password_401/1,
+    renew_unknown_localpart_401/1,
+    renew_malformed_401/1,
+    renew_deleted_profile_401/1,
+    renew_account_missing_401/1,
+    renew_validation/1,
+    renew_xmpp_unavailable_503/1,
+    renew_xmpp_slow_503/1,
+    renew_xmpp_unauthorized_500/1,
+    renew_garbage_500/1,
+    renew_crash_is_sanitised/1,
+    renew_mongo_unavailable_503/1,
     logs_contain_no_secrets/1
 ]).
 %% logger handler callback
@@ -49,12 +62,24 @@ all() ->
         xmpp_slow_times_out,
         xmpp_unauthorized_500,
         xmpp_exists_500_no_remove,
+        renew_200,
+        renew_wrong_password_401,
+        renew_unknown_localpart_401,
+        renew_malformed_401,
+        renew_deleted_profile_401,
+        renew_account_missing_401,
+        renew_validation,
+        renew_xmpp_unavailable_503,
+        renew_xmpp_slow_503,
+        renew_xmpp_unauthorized_500,
+        renew_garbage_500,
+        renew_crash_is_sanitised,
         {group, mongo_down},
         logs_contain_no_secrets
     ].
 
 groups() ->
-    [{mongo_down, [], [mongo_unavailable_503]}].
+    [{mongo_down, [], [mongo_unavailable_503, renew_mongo_unavailable_503]}].
 
 init_per_suite(Config) ->
     Hosts = hosts(),
@@ -120,9 +145,11 @@ init_per_testcase(_Case, Config) ->
     geo_fake_mim:set_mode(ok),
     geo_fake_mim:reset(),
     delete_all_profiles(),
-    Config.
+    [{log_mark, length(geo_fake_mim:log_events())} | Config].
 
+%% meck is node-global: always unload, whatever the case did.
 end_per_testcase(_Case, _Config) ->
+    catch meck:unload(),
     geo_fake_mim:set_mode(ok),
     delete_all_profiles(),
     ok.
@@ -330,6 +357,193 @@ mongo_unavailable_503(Config) ->
     #{<<"error">> := <<"service_unavailable">>} = json:decode(B),
     [] = geo_fake_mim:calls().
 
+%%% Renew --------------------------------------------------------------------------------
+
+-define(RENEW_PATH, "/api/session/renew").
+-define(WRONG_BODY,
+    <<"{\"error\":\"invalid_credentials\",\"message\":\"These credentials are not valid.\"}">>
+).
+
+renew_200(Config) ->
+    Nick = nick(Config, "Rn"),
+    {Jid, Password, _Token0} = create_session(Nick),
+    geo_fake_mim:reset(),
+    {200, Headers, Body} = renew_json(Jid, Password),
+    "application/json" = binary_to_list(maps:get(<<"content-type">>, Headers)),
+    <<"no-store">> = maps:get(<<"cache-control">>, Headers),
+    %% Exactly the four keys, in this order.
+    {match, _} = re:run(
+        Body,
+        "^\\{\"nickname\":\"[^\"]+\",\"token\":\"[^\"]+\",\"token_type\":\"Bearer\",\"expires_in\":3600\\}$"
+    ),
+    #{<<"nickname">> := Nick, <<"token">> := Token, <<"token_type">> := <<"Bearer">>} =
+        Decoded = json:decode(Body),
+    4 = map_size(Decoded),
+    remember([Token]),
+    {ok, #{sub := Localpart, iat := Iat, exp := Exp}} =
+        geo_auth:verify(Token, <<?JWT_SECRET>>, erlang:system_time(second)),
+    3600 = Exp - Iat,
+    Jid = <<Localpart/binary, "@", ?DOMAIN>>,
+    [#{op := check, auth := Auth, vars := #{<<"user">> := Jid, <<"password">> := Password}}] =
+        geo_fake_mim:calls(),
+    Auth = <<"Basic ", (base64:encode(<<?ADMIN_USER, ":", ?ADMIN_PASSWORD>>))/binary>>,
+    %% The renewed token is accepted by /api/locate.
+    LocateBody = <<"{\"lat\":0.5,\"lng\":0.5}">>,
+    {200, _, LocateResp} = raw_to(
+        "/api/locate",
+        "POST",
+        [
+            {"content-type", "application/json"},
+            {"authorization", "Bearer " ++ binary_to_list(Token)},
+            {"content-length", integer_to_list(byte_size(LocateBody))}
+        ],
+        LocateBody
+    ),
+    #{<<"room_jid">> := _} = json:decode(LocateResp).
+
+renew_wrong_password_401(Config) ->
+    {Jid, _Password, _} = create_session(nick(Config, "Wp")),
+    geo_fake_mim:reset(),
+    Wrong = geo_session:new_password(),
+    remember([Wrong]),
+    {401, H, ?WRONG_BODY} = renew_json(Jid, Wrong),
+    <<"no-store">> = maps:get(<<"cache-control">>, H),
+    error = maps:find(<<"www-authenticate">>, H),
+    1 = length(calls(check)).
+
+renew_unknown_localpart_401(_Config) ->
+    Jid = <<(geo_session:new_localpart())/binary, "@", ?DOMAIN>>,
+    Password = geo_session:new_password(),
+    remember([Password]),
+    {401, _, ?WRONG_BODY} = renew_json(Jid, Password),
+    [] = geo_fake_mim:calls().
+
+renew_malformed_401(Config) ->
+    {Jid, Password, _} = create_session(nick(Config, "Mf")),
+    geo_fake_mim:reset(),
+    Local = geo_session:new_localpart(),
+    Bad = [
+        {<<"alice@", ?DOMAIN>>, Password},
+        {<<Local/binary, "@other.example">>, Password},
+        {Jid, <<"not-an-xmpp-password">>},
+        {Jid, <<"xp1_short">>},
+        {string:uppercase(Jid), Password}
+    ],
+    lists:foreach(fun({J, P}) -> {401, _, ?WRONG_BODY} = renew_json(J, P) end, Bad),
+    [] = geo_fake_mim:calls().
+
+renew_deleted_profile_401(Config) ->
+    {Jid, Password, _} = create_session(nick(Config, "Del")),
+    [Localpart, _] = binary:split(Jid, <<"@">>),
+    ok = geo_store:delete_profile(Localpart),
+    geo_fake_mim:reset(),
+    {401, _, ?WRONG_BODY} = renew_json(Jid, Password),
+    [] = geo_fake_mim:calls().
+
+renew_account_missing_401(Config) ->
+    {Jid, Password, _} = create_session(nick(Config, "Gone")),
+    ok = geo_fake_mim:forget_user(Jid),
+    geo_fake_mim:reset(),
+    {401, _, ?WRONG_BODY} = renew_json(Jid, Password),
+    1 = length(calls(check)).
+
+renew_validation(_Config) ->
+    Json = [{"content-type", "application/json"}],
+    Path = ?RENEW_PATH,
+    lists:foreach(
+        fun(Method) ->
+            {405, H, B} = raw_to(Path, Method, [{"content-length", "0"}], <<>>),
+            <<"POST">> = maps:get(<<"allow">>, H),
+            <<"no-store">> = maps:get(<<"cache-control">>, H),
+            #{<<"error">> := <<"method_not_allowed">>} = json:decode(B)
+        end,
+        ["GET", "PUT", "DELETE"]
+    ),
+    Body = <<"{\"jid\":\"a\",\"xmpp_password\":\"b\"}">>,
+    Len = [{"content-length", integer_to_list(byte_size(Body))}],
+    {415, _, B415} = raw_to(Path, "POST", Len, Body),
+    #{<<"error">> := <<"unsupported_media_type">>} = json:decode(B415),
+    {415, _, _} = raw_to(Path, "POST", [{"content-type", "text/plain"} | Len], Body),
+    Big = binary:copy(<<"a">>, 1025),
+    {413, _, B413} = raw_to(Path, "POST", Json ++ [{"content-length", "1025"}], Big),
+    #{<<"error">> := <<"payload_too_large">>} = json:decode(B413),
+    {400, _, BJ} = raw_to(Path, "POST", Json ++ [{"content-length", "4"}], <<"nope">>),
+    #{<<"error">> := <<"invalid_json">>} = json:decode(BJ),
+    lists:foreach(
+        fun(Bad) ->
+            {400, _, B} = renew_raw(Bad),
+            #{<<"error">> := <<"invalid_request">>} = json:decode(B)
+        end,
+        [
+            <<"{\"jid\":\"a\"}">>,
+            <<"{\"xmpp_password\":\"a\"}">>,
+            <<"{\"jid\":\"a\",\"xmpp_password\":\"b\",\"x\":1}">>,
+            <<"{\"jid\":1,\"xmpp_password\":2}">>,
+            <<"{\"jid\":null,\"xmpp_password\":\"b\"}">>,
+            <<"{}">>
+        ]
+    ),
+    %% Cowboy routes exact segments: a longer path is the catch-all 404.
+    {404, _, _} = raw_to(Path ++ "/x", "POST", Json ++ [{"content-length", "2"}], <<"{}">>),
+    [] = geo_fake_mim:calls().
+
+renew_xmpp_unavailable_503(Config) ->
+    {Jid, Password, _} = create_session(nick(Config, "U503")),
+    geo_fake_mim:set_mode(http503),
+    {503, H, B} = renew_json(Jid, Password),
+    <<"5">> = maps:get(<<"retry-after">>, H),
+    <<"no-store">> = maps:get(<<"cache-control">>, H),
+    #{<<"error">> := <<"service_unavailable">>} = json:decode(B).
+
+renew_xmpp_slow_503(Config) ->
+    {Jid, Password, _} = create_session(nick(Config, "Slw")),
+    geo_fake_mim:set_mode(slow_check),
+    {Micros, {503, H, _}} = timer:tc(fun() -> renew_json(Jid, Password) end),
+    true = Micros < 6500000,
+    <<"5">> = maps:get(<<"retry-after">>, H).
+
+renew_xmpp_unauthorized_500(Config) ->
+    {Jid, Password, _} = create_session(nick(Config, "U401")),
+    geo_fake_mim:set_mode(unauthorized),
+    {500, _, B} = renew_json(Jid, Password),
+    #{<<"error">> := <<"internal_error">>} = json:decode(B).
+
+renew_garbage_500(Config) ->
+    {Jid, Password, _} = create_session(nick(Config, "Grb")),
+    geo_fake_mim:set_mode(garbage),
+    {500, _, B} = renew_json(Jid, Password),
+    #{<<"error">> := <<"internal_error">>} = json:decode(B).
+
+renew_mongo_unavailable_503(_Config) ->
+    Jid = <<(geo_session:new_localpart())/binary, "@", ?DOMAIN>>,
+    {503, H, B} = renew_json(Jid, geo_session:new_password()),
+    <<"5">> = maps:get(<<"retry-after">>, H),
+    #{<<"error">> := <<"service_unavailable">>} = json:decode(B),
+    [] = geo_fake_mim:calls().
+
+%% The crash happens after the body is decoded and its reason carries the password. The
+%% handler answers 500 and logs only the sanitised summary.
+renew_crash_is_sanitised(Config) ->
+    {Jid, Password, _} = create_session(nick(Config, "Crash")),
+    ok = meck:new(geo_session, [passthrough]),
+    ok = meck:expect(geo_session, renew, fun(_J, P, _C) ->
+        meck:exception(error, {badmatch, P})
+    end),
+    {500, _, B} = renew_json(Jid, Password),
+    #{<<"error">> := <<"internal_error">>} = json:decode(B),
+    timer:sleep(300),
+    Events = lists:nthtail(?config(log_mark, Config), geo_fake_mim:log_events()),
+    [Report] = [R || #{msg := {report, #{event := renew_crashed} = R}} <- Events],
+    [class, event, reason, where] = lists:sort(maps:keys(Report)),
+    #{class := error, reason := badmatch, where := Where} = Report,
+    true = lists:all(
+        fun({M, F, A, _}) -> is_atom(M) andalso is_atom(F) andalso is_integer(A) end, Where
+    ),
+    [] = [E || #{msg := {report, #{label := {proc_lib, crash}}}} = E <- Events],
+    Texts = [lists:flatten(io_lib:format("~0p", [E])) || E <- Events],
+    lists:foreach(fun(T) -> nomatch = string:find(T, "had its request process") end, Texts),
+    lists:foreach(fun(T) -> nomatch = string:find(T, binary_to_list(Password)) end, Texts).
+
 %% Last: no captured log event contains a password, token or configured secret.
 logs_contain_no_secrets(_Config) ->
     %% Control: the filter is live, so a secret logged on purpose comes out masked.
@@ -349,7 +563,8 @@ logs_contain_no_secrets(_Config) ->
     Basic = binary_to_list(base64:encode(<<?ADMIN_USER, ":", ?ADMIN_PASSWORD>>)),
     Secrets =
         [binary_to_list(S) || S <- geo_fake_mim:secrets()] ++
-            [?JWT_SECRET, ?ADMIN_PASSWORD, Basic],
+            %% The fake's user_does_not_exist message echoes the password, as MongooseIM does.
+            [?JWT_SECRET, ?ADMIN_PASSWORD, Basic, "does not exist"],
     true = length(Secrets) > 3,
     lists:foreach(
         fun(Secret) ->
@@ -491,9 +706,36 @@ post_raw(Body) ->
     ).
 
 raw(Method, Headers, Body) ->
+    raw_to("/api/session", Method, Headers, Body).
+
+%% Creates a session through the API and returns {Jid, Password, Token}; the secrets are
+%% registered for the final log scan.
+create_session(Nick) ->
+    {201, _, Body} = post_json(#{<<"nickname">> => Nick}),
+    #{<<"jid">> := Jid, <<"xmpp_password">> := Password, <<"token">> := Token} = json:decode(Body),
+    remember([Password, Token]),
+    {Jid, Password, Token}.
+
+renew_json(Jid, Password) ->
+    renew_raw(iolist_to_binary(json:encode(#{<<"jid">> => Jid, <<"xmpp_password">> => Password}))).
+
+renew_raw(Body) ->
+    raw_to(
+        ?RENEW_PATH,
+        "POST",
+        [
+            {"content-type", "application/json"},
+            {"content-length", integer_to_list(byte_size(Body))}
+        ],
+        Body
+    ).
+
+raw_to(Path, Method, Headers, Body) ->
     Request = iolist_to_binary([
         Method,
-        " /api/session HTTP/1.1\r\nhost: 127.0.0.1\r\nconnection: close\r\n",
+        " ",
+        Path,
+        " HTTP/1.1\r\nhost: 127.0.0.1\r\nconnection: close\r\n",
         [[Name, ": ", Value, "\r\n"] || {Name, Value} <- Headers],
         "\r\n",
         Body

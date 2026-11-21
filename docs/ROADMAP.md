@@ -61,13 +61,14 @@ Carry-forward for the next slices (from the 2a/2a+ reviews):
 - [x] MongooseIM admin API integration: register users (slice 3c, ADR-017, verified live 2026-11-21)
 - [ ] Lock down MUC: `default_room.public = false` (a public disco listing of geohash rooms would reveal
       which cells are active, a location leak) and restrict room creation to geo_service/admin
-- [ ] Client switches to `/api/locate` for room assignment
+- [x] Slice 3e-1: `POST /api/session/renew` (server, ADR-019, verified live 2026-11-21)
+- [ ] Client switches to `/api/locate` for room assignment (3e-2: client identity, Welcome page, token manager; 3e-3: locate switch, server-assigned rooms)
 - **Demo:** rooms assigned by the server, recorded in MongoDB
 
 ## Phase 4 — Room lifecycle & movement
 - [ ] `geo_room` process per active cell with idle shutdown under `geo_room_sup`
 - [ ] Client hysteresis + automatic room switching + "you entered …" notice
-- [ ] `geo_rate`: token bucket + impossible-jump rejection; `geo_rate` also limits POST /api/session per client IP (trusted-proxy XFF)
+- [ ] `geo_rate`: token bucket + impossible-jump rejection; `geo_rate` also limits POST /api/session and POST /api/session/renew per client IP (trusted-proxy XFF)
 - [ ] Ephemeral history: MAM limited to last 24 h; idle rooms TTL'd in MongoDB
 - **Demo:** walk (or drag the dev pin) across cells and watch rooms switch
 

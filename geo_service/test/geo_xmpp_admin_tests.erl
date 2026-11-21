@@ -134,3 +134,65 @@ gql_error(Code) ->
             <<"data">> => #{<<"account">> => #{<<"registerUser">> => null}}
         })
     ).
+
+%%% check_password -------------------------------------------------------------------------
+
+check_request_test() ->
+    {Url, Headers, ContentType, Body} =
+        geo_xmpp_admin:check_password_request(?ADMIN, ?JID, <<"xp1_secret">>),
+    ?assertEqual("http://mongooseim:5551/api/graphql", Url),
+    ?assertEqual([{"authorization", "Basic QWxhZGRpbjpvcGVu"}], Headers),
+    ?assertEqual("application/json", ContentType),
+    #{<<"query">> := Query, <<"variables">> := Variables} = json:decode(Body),
+    ?assertMatch({_, _}, binary:match(Query, <<"checkPassword">>)),
+    %% Only `correct` is selected: the default `message` field would echo the password.
+    ?assertMatch({_, _}, binary:match(Query, <<"{ correct }">>)),
+    ?assertEqual(nomatch, binary:match(Query, <<"message">>)),
+    ?assertEqual(nomatch, binary:match(Query, <<"xp1_secret">>)),
+    ?assertEqual(nomatch, binary:match(Query, <<"u0123456789abcdef">>)),
+    ?assertEqual(#{<<"user">> => ?JID, <<"password">> => <<"xp1_secret">>}, Variables).
+
+check_query_is_a_constant_test() ->
+    Query = fun(Jid, Password) ->
+        {_, _, _, Body} = geo_xmpp_admin:check_password_request(?ADMIN, Jid, Password),
+        maps:get(<<"query">>, json:decode(Body))
+    end,
+    ?assertEqual(Query(<<"a">>, <<"b">>), Query(<<"c">>, <<"d">>)).
+
+check_correct_test() ->
+    ?assertEqual(ok, parse_check(200, check_body(true))),
+    ?assertEqual({error, invalid}, parse_check(200, check_body(false))).
+
+check_user_does_not_exist_test() ->
+    Body = json:encode(#{
+        <<"errors">> => [
+            #{
+                <<"message">> => <<"Password xp1_secret for user x does not exist">>,
+                <<"extensions">> => #{<<"code">> => <<"user_does_not_exist">>}
+            }
+        ],
+        <<"data">> => #{<<"account">> => #{<<"checkPassword">> => null}}
+    }),
+    ?assertEqual({error, invalid}, parse_check(200, Body)).
+
+check_bad_response_test() ->
+    ?assertEqual({error, bad_response}, parse_check(200, gql_error(<<"something_else">>))),
+    ?assertEqual({error, bad_response}, parse_check(200, check_body(<<"true">>))),
+    ?assertEqual({error, bad_response}, parse_check(200, check_body(null))),
+    ?assertEqual({error, bad_response}, parse_check(200, <<"<html>">>)),
+    ?assertEqual({error, bad_response}, parse_check(200, <<"{}">>)),
+    ?assertEqual({error, bad_response}, parse_check(400, gql_error(<<"input_coercion">>))),
+    ?assertEqual({error, bad_response}, parse_check(302, <<>>)).
+
+check_status_errors_test() ->
+    ?assertEqual({error, unauthorized}, parse_check(401, gql_error(<<"wrong_credentials">>))),
+    ?assertEqual({error, unavailable}, parse_check(500, <<>>)),
+    ?assertEqual({error, unavailable}, parse_check(503, <<"down">>)).
+
+parse_check(Status, Body) ->
+    geo_xmpp_admin:parse_check_password(Status, iolist_to_binary(Body)).
+
+check_body(Correct) ->
+    json:encode(#{
+        <<"data">> => #{<<"account">> => #{<<"checkPassword">> => #{<<"correct">> => Correct}}}
+    }).
