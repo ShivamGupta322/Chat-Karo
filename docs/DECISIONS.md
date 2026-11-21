@@ -91,7 +91,7 @@ names, never config lines. Upgrading MongooseIM means re-diffing the template ag
 the shim warning and the status mapping in the adapter.
 
 ## ADR-009 — Product name "Nearby" and UI design tokens
-**Status:** Accepted (Phase 2, slice 2a+, 2026-11-17)
+**Status:** Accepted (Phase 2, slice 2a+, 2026-11-17). Amended by ADR-019 (3e-2): the dev username login and `ui/addresses.ts` are removed.
 **Context:** The UI needed a user-facing identity. The 2a screens used XMPP jargon ("JID", "Room JID") and default
 browser styling. Nothing about branding had been decided before.
 **Decision:**
@@ -438,7 +438,7 @@ assigns rooms and coordinates are never stored; this slice has to compute the ce
 - Phase 3 deletes `roomJidForCell` and its single call site in `pages/Chat.tsx` when `/api/locate` assigns rooms;
   `cellFor` and the encoder stay.
 - `ui/addresses.ts` (`toRoomJid`, `roomLabel`) and the room branch of `describeAddressError` are now unused by the UI and
-  are Phase 3 cleanup candidates.
+  are Phase 3 cleanup candidates (addresses cleanup done in 3e-2: the whole file is deleted).
 **Live evidence (2026-11-19, `npm run dev`, MongooseIM 6.2.1):**
 - **Denied state (AC14):** the browser pane had geolocation blocked → the denied text plus "Or choose a test location
   below.", a "Try location again" button and the "Test locations (dev)" panel; composer disabled; no join presence sent.
@@ -952,7 +952,7 @@ printed; request bodies sent from files):
   later line went out unredacted); a following line with an `xp1_` test string came out `[REDACTED]`.
 
 ## ADR-019 — Session renewal (POST /api/session/renew) and the client switch design
-**Status:** Accepted (server part, slice 3e-1). Client decisions D1-D7 land in slices 3e-2 and 3e-3; D3 was confirmed by the user on 2026-11-21.
+**Status:** Accepted. Server part 3e-1. Client identity 3e-2: D1, D2 (token manager; first use in 3e-3), D4 (network, storage and xmpp guards; the locate guard comes in 3e-3), D5, D6, D7. D3 confirmed 2026-11-21, lands in 3e-2/3e-3.
 **Context:** A returning device holds `{jid, xmpp_password}` (ADR-017) but its 1 h API token is gone. It needs a way to get a
 fresh token without a second identity, an email or a cookie. The request body carries a live credential, so the handler
 must not let it reach a log or a crash report (ADR-018 section 4b reasoning). Probed live on MongooseIM 6.2.1 by the
@@ -1053,3 +1053,78 @@ that case fails, so the test is not vacuous.
   `listUsers` shows only alice and bob.
 - (A first run tested the stale image, every renew → 404, because the rebuild had not taken effect; the run above is on
   the rebuilt image.)
+
+### Client implementation (3e-2)
+- **MUC nick = profile nickname from 3e-2.** The server-made localpart `u<32 hex>` is 33 characters, over `MAX_NICK_LENGTH`
+  (32), so every join would fail with `invalid-nick`. `Chat` takes `nickname` and `AppHeader` shows it; no jid or localpart
+  is ever displayed.
+- **Token manager lifetime.** It starts with the identity (reload, Continue, Try again, after onboarding) and stops on sign
+  out, Start over and a terminal XMPP disconnect (auth-failed, connection-failed, conflict, pagehide). `reconnecting` is not
+  terminal, and a renew failure never touches XMPP. `getToken` bypasses a backoff wait (it is user-driven and rare); the
+  background loop alone obeys the backoff. Renew 400/404/405/413/415 is `failed` (terminal, no retry; 404 is what a stale
+  geo_service image returns), a still-unexpired token is kept until it expires. A 401 is `identity-invalid`.
+- **One returning view.** Sign out, an auth failure and a connection failure all land on the same "Welcome back" card
+  ("Continue as X" or "Try again", plus "Start over with a new name"); a connecting card has a Cancel so a hung socket never
+  traps the user.
+- **`connectWhenIdle`.** `client.connect()` does nothing unless the state is `idle` or `disconnected`, so a fast Continue or
+  Start over while the old session is still `disconnecting` would silently not connect. The controller connects on the first
+  `idle`/`disconnected` state instead (one pending connect, cancelled by sign out and Start over). The connect runs in a
+  microtask: connecting inside the client's own emit would deliver `connecting` to the other listeners before they saw
+  `disconnected`. A `disconnected` that completes the previous session while a connect is pending is not terminal: the token
+  manager keeps running.
+- **`describeConnectionError` copy** no longer says "sign in again" (there is no password to retype): auth-failed "Nearby couldn't
+  sign you in with this name.", connection-failed "Can't reach the chat server right now. Try again in a moment.",
+  connection-lost "Connection lost. Try again.", error "Something went wrong. Try again."
+- **Custom `alertdialog`** (`components/ConfirmDialog.tsx`): jsdom has no `HTMLDialogElement.showModal`. Focus starts on Cancel
+  (the safe default), Tab is trapped between the two buttons, Escape and a backdrop click cancel, and focus returns to the opener.
+- **Malformed or foreign-domain stored entries are ignored, not deleted** (nothing is deleted without a user action); the
+  next onboarding overwrites the key. If `clear()` fails on Start over the next reload brings the old identity back; accepted.
+- **`VITE_API_URL`** must match `^/(?:[A-Za-z0-9._~-]+/)*[A-Za-z0-9._~-]+$` with no `.` or `..` segment, and is checked untrimmed
+  (a value with whitespace or a newline is rejected, only a blank value means the default `/api`). The error never echoes it.
+- **Two tabs, one identity:** both connect with the same jid and join with the same nick; one becomes `Name-2` through the
+  existing conflict retry. Accepted.
+- **A 201 that fails client validation** leaves an orphan identity, consistent with ADR-017's accepted orphan case.
+- **Test timeout.** Vitest `testTimeout` is 20 s: the userEvent component tests flaked at the 5 s default under load at 4d90200.
+- **Focus after a view change.** When a view change unmounts the focused button (confirming Start over, Sign out, the connecting
+  card's Cancel), focus would fall to `<body>`. `NewView` and `ReturningView` therefore focus their heading on mount, but only
+  if focus is on `<body>` or detached (never stealing it). The heading has `tabIndex={-1}` (programmatic only, not a tab stop):
+  it announces the context, raises no mobile keyboard, and one Tab reaches the first control. `ConfirmDialog` is unchanged
+  (restore-to-opener stays right for Cancel and Escape).
+- **Bundle size.** JS is +15 505 B raw / +5.0 kB gzip against the 4d90200 baseline, over the +8 000 B estimate. Accepted: the
+  estimate missed about 1 350 lines of first-party validation, token manager, credential store, controller and three UI components
+  against about 2 kB removed. No dependency was added and dev code is verified absent. The baseline for 3e-3 is the final 3e-2 bundle, JS 267 841 B (round 2 included), with
+  a budget of +4 000 B raw.
+- **Not in 3e-2:** `/api/locate` calls and the `roomJidForCell` removal (3e-3).
+
+### Live evidence (3e-2)
+**2026-11-21, in-app browser pane, `npm run dev`, geo_service at 4d90200:**
+- Fresh visit with empty storage → Welcome ("Pick a name", the device-only explanation). Keyboard only: one Tab lands on
+  "Your name", type `LiveA3e`, Enter → Online, header shows `LiveA3e`. Storage holds exactly `nearby.identity.v1` with keys
+  `v, jid, xmppPassword, nickname` (`v` 1, jid `u<32 hex>@chaterl.localhost`). Test spot A → join presence
+  `g7_u4pruyd@muc.chaterl.localhost/LiveA3e` (the nickname is the MUC nick).
+- Reload → no form, signed straight back in as `LiveA3e`; one `POST /api/session/renew` → 200.
+- Second tab `?identity=b`: `livea3e` → field error "That name is taken. Try another." (`aria-invalid`, described by the
+  hint and the error); `LiveB3e` → Online, stored as `nearby.identity.v1.b`. Both at test spot A: "People here · 2" and
+  messages delivered both ways.
+- Sign out → "Welcome back / Continue as LiveA3e / Start over with a new name", credential kept → Continue → Online as
+  `LiveA3e`. Start over by keyboard: `role=alertdialog` titled "Start over with a new name?", described "Your current name
+  can't be recovered.", focus on Cancel; Escape closes it, focus returns to the trigger, nothing wiped; confirming removed
+  `nearby.identity.v1` and showed the form; `LiveC3e` → Online. (Round 1 finding: after confirming, focus fell to `<body>`; fixed in round 2, see below.)
+- `docker compose stop mongooseim`, new slot `?identity=c`, `LiveD3e` → "Nearby can't create names right now. Try again in a
+  few seconds." after 8 s; nothing stored for slot c. MongooseIM restarted.
+- `docker compose stop mongo`, reload `?identity=b` → Online as `LiveB3e`, no notice; renew → 503 four times with growing
+  gaps, then 200 after `start mongo`; XMPP never dropped.
+- Storage: only `nearby.identity.v1` and `nearby.identity.v1.b`; sessionStorage and cookies empty; no JWT-shaped string in
+  any stored value. Console in both tabs: 0 hits for `xp1_` and `eyJ`.
+- 360×640, round 1: Welcome (new) and Chat → `scrollWidth` 360 (no horizontal overflow).
+- Production build (re-run by the orchestrator): one JS (267 578 B, gzip 84.23 kB) and one CSS (16 699 B); 0 hits for the
+  dev-login terms, `alice`, and `dev identity slot|Test spot A|Test locations|leaflet|openstreetmap`; 1 hit each for
+  `nearby.identity.v1` and `That name is taken. Try another.`. JS +15 505 B vs the 4d90200 baseline (plan budget +8 000 B).
+- Cleanup: LiveA3e, LiveB3e, LiveC3e removed with `mongooseimctl account removeUser`, their profiles deleted; `listUsers`
+  shows only alice and bob; browser storage cleared.
+- Round 2 (after the token-race and focus fixes), 360×640, slot `?identity=e`: sign out → focus on the "Welcome back"
+  heading, returning view `scrollWidth` 360; Start over dialog 360 (dialog box 16–344 px); confirm → focus on the "Pick a
+  name" heading, one Tab reaches "Your name"; the returning view with a connection error ("Can't reach the chat server right
+  now…", MongooseIM stopped) 360; Chat with the identity-invalid notice (profile deleted, renew 401: "Nearby can't confirm
+  your name anymore…", still Online, nothing wiped) 360. The connecting view was not measured: with MongooseIM stopped it
+  passes too quickly to sample. Cleanup: LiveE3e and LiveF3e removed; `listUsers` shows only alice and bob.

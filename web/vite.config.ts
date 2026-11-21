@@ -48,6 +48,8 @@ export default defineConfig(({ mode }) => {
       environment: 'jsdom',
       setupFiles: ['./tests/setup.ts'],
       include: ['tests/**/*.test.{ts,tsx}'],
+      // userEvent-heavy component tests time out at the 5 s default under load on this machine (3-8 per run at 4d90200).
+      testTimeout: 20_000,
     },
   };
 });

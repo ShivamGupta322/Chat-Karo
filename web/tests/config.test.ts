@@ -11,6 +11,7 @@ describe('parseConfig', () => {
         xmppWsUrl: 'ws://localhost:5280/ws-xmpp',
         xmppDomain: 'chaterl.localhost',
         mucDomain: 'muc.chaterl.localhost',
+        apiUrl: '/api',
         mapTileUrl: null,
       },
     });
@@ -85,6 +86,64 @@ describe('parseConfig', () => {
       expect(r).toEqual({
         ok: false,
         errors: ['VITE_XMPP_WS_URL must be a ws:// or wss:// URL', 'VITE_XMPP_DOMAIN is invalid', MSG],
+      });
+    });
+  });
+
+  describe('VITE_API_URL', () => {
+    const MSG = 'VITE_API_URL must be a same-origin path such as /api';
+
+    it.each([undefined, '', '   '])('unset (%j) defaults to /api', (v) => {
+      const r = parseConfig({ ...base, VITE_API_URL: v });
+      expect(r.ok && r.config.apiUrl).toBe('/api');
+    });
+
+    it.each(['/api', '/v1/api', '/a.b_c~d-e'])('accepts %j', (input) => {
+      const r = parseConfig({ ...base, VITE_API_URL: input });
+      expect(r.ok && r.config.apiUrl).toBe(input);
+    });
+
+    it.each([
+      'api',
+      '//evil',
+      '/api/',
+      '/',
+      '/api?x',
+      '/api#x',
+      '/a b',
+      '/../x',
+      '/./x',
+      '/a/../x',
+      'http://x/api',
+      '/api\n',
+      ' /api',
+    ])('rejects %j with exactly the one error', (input) => {
+      expect(parseConfig({ ...base, VITE_API_URL: input })).toEqual({ ok: false, errors: [MSG] });
+    });
+
+    it('never echoes the value in an error', () => {
+      const r = parseConfig({ ...base, VITE_API_URL: 'https://SECRET123.example/api' });
+      expect(r.ok).toBe(false);
+      if (!r.ok) expect(r.errors.join()).not.toContain('SECRET123');
+    });
+
+    it('keeps error order: ws, domain, muc, api, tiles', () => {
+      const r = parseConfig({
+        VITE_XMPP_WS_URL: 'http://x',
+        VITE_XMPP_DOMAIN: 'a@b',
+        VITE_XMPP_MUC_DOMAIN: 'bad/muc',
+        VITE_API_URL: '//evil',
+        VITE_MAP_TILE_URL: 'nope',
+      });
+      expect(r).toEqual({
+        ok: false,
+        errors: [
+          'VITE_XMPP_WS_URL must be a ws:// or wss:// URL',
+          'VITE_XMPP_DOMAIN is invalid',
+          'VITE_XMPP_MUC_DOMAIN is invalid',
+          MSG,
+          'VITE_MAP_TILE_URL must be an http(s) URL template with {z}, {x} and {y}',
+        ],
       });
     });
   });

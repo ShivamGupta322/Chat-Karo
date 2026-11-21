@@ -1,19 +1,18 @@
+import type { OnboardError } from '../state/identity';
 import { MAX_MESSAGE_LENGTH, type ConnectionError, type JoinFailure, type SendResult } from '../xmpp';
 
 export type SendError = Extract<SendResult, { ok: false }>['error'];
-export type AddressKind = 'account' | 'room';
-export type AddressError = 'empty' | 'invalid' | 'wrong-domain';
 
 export function describeConnectionError(error: ConnectionError): string {
   switch (error.reason) {
     case 'auth-failed':
-      return 'Wrong username or password.';
+      return "Nearby couldn't sign you in with this name.";
     case 'connection-failed':
-      return "Can't reach the chat server. Check that it's running and try again.";
+      return "Can't reach the chat server right now. Try again in a moment.";
     case 'connection-lost':
-      return 'Connection lost. Please sign in again.';
+      return 'Connection lost. Try again.';
     case 'error':
-      return 'Something went wrong. Please sign in again.';
+      return 'Something went wrong. Try again.';
   }
 }
 
@@ -67,29 +66,47 @@ export function describeSendError(error: SendError): string {
   return SEND_ERRORS[error];
 }
 
-export function describeAddressError(
-  kind: AddressKind,
-  error: AddressError,
-  domain: string,
-): string {
-  if (kind === 'account') {
-    switch (error) {
-      case 'empty':
-        return 'Enter your username.';
-      case 'invalid':
-        return 'Usernames use letters, numbers, dots, dashes or underscores.';
-      case 'wrong-domain':
-        return `Use an account on ${domain}.`;
-    }
-  }
-  switch (error) {
-    case 'empty':
-      return 'Enter a room name.';
-    case 'invalid':
-      return INVALID_ROOM;
-    case 'wrong-domain':
-      return "That room isn't on this server.";
-  }
+export const IDENTITY_TEXT = {
+  tagline: 'Chat with people around you',
+  heading: 'Pick a name',
+  nicknameLabel: 'Your name',
+  nicknameHint: '2–20 characters: letters, numbers, - or _. Start with a letter or number.',
+  deviceNote:
+    "Nearby gives you a name on this device only. There's no email or password. If you clear this browser's data or switch devices, you'll start again with a new name.",
+  submit: 'Start chatting',
+  creating: 'Creating…',
+  errorEmpty: 'Enter a name.',
+  errorInvalid:
+    'Names are 2–20 characters: letters, numbers, - or _, starting with a letter or number.',
+  errorTaken: 'That name is taken. Try another.',
+  errorUnavailable: "Nearby can't create names right now. Try again in a few seconds.",
+  errorFailed: 'Something went wrong. Try again.',
+  returningHeading: 'Welcome back',
+  continueAs: (name: string): string => `Continue as ${name}`,
+  tryAgain: 'Try again',
+  startOver: 'Start over with a new name',
+  connecting: (name: string): string => `Signing you in as ${name}…`,
+  cancel: 'Cancel',
+  signOut: 'Sign out',
+  notRemembered: "This name won't be remembered on this device.",
+  identityInvalid:
+    "Nearby can't confirm your name anymore. You can keep chatting for now, or start over with a new name.",
+  identityInvalidAction: 'Start over',
+  confirmTitle: 'Start over with a new name?',
+  confirmBody: "Your current name can't be recovered.",
+  confirmAction: 'Start over',
+} as const;
+
+const ONBOARD_ERRORS = {
+  empty: IDENTITY_TEXT.errorEmpty,
+  invalid: IDENTITY_TEXT.errorInvalid,
+  taken: IDENTITY_TEXT.errorTaken,
+  unavailable: IDENTITY_TEXT.errorUnavailable,
+  failed: IDENTITY_TEXT.errorFailed,
+} satisfies Record<OnboardError, string>;
+
+export function describeOnboardError(e: OnboardError): string {
+  return ONBOARD_ERRORS[e];
 }
 
 export const CONNECTION_TEXT = {

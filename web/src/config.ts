@@ -3,6 +3,8 @@ export interface AppConfig {
   xmppWsUrl: string;
   xmppDomain: string;
   mucDomain: string;
+  /** Same-origin path of geo_service's HTTP API, e.g. /api. */
+  apiUrl: string;
   /** Dev-only map tile URL template, or null when unset. */
   mapTileUrl: string | null;
 }
@@ -16,6 +18,14 @@ function str(v: string | boolean | undefined): string {
 
 function validDomain(d: string): boolean {
   return d.length > 0 && !/[@/\s]/.test(d);
+}
+
+const API_URL_ERROR = 'VITE_API_URL must be a same-origin path such as /api';
+
+/** A same-origin absolute path: /a/b with safe segment characters, no trailing slash, no . or .. segment. */
+function validApiPath(p: string): boolean {
+  if (!/^\/(?:[A-Za-z0-9._~-]+\/)*[A-Za-z0-9._~-]+$/.test(p)) return false;
+  return !p.split('/').some((s) => s === '.' || s === '..');
 }
 
 const MAP_TILE_ERROR = 'VITE_MAP_TILE_URL must be an http(s) URL template with {z}, {x} and {y}';
@@ -62,6 +72,11 @@ export function parseConfig(env: Env): ConfigResult {
   const muc = mucRaw !== '' ? mucRaw : `muc.${domain}`;
   if (mucRaw !== '' && !validDomain(mucRaw)) errors.push('VITE_XMPP_MUC_DOMAIN is invalid');
 
+  // Not trimmed: stray whitespace or a newline must be rejected, not silently dropped. Blank means the default.
+  const apiRaw = typeof env.VITE_API_URL === 'string' ? env.VITE_API_URL : '';
+  const api = apiRaw.trim() === '' ? '/api' : apiRaw;
+  if (!validApiPath(api)) errors.push(API_URL_ERROR);
+
   const tiles = str(env.VITE_MAP_TILE_URL);
   if (tiles !== '' && !validTileTemplate(tiles)) errors.push(MAP_TILE_ERROR);
 
@@ -72,6 +87,7 @@ export function parseConfig(env: Env): ConfigResult {
       xmppWsUrl: ws,
       xmppDomain: domain,
       mucDomain: muc,
+      apiUrl: api,
       mapTileUrl: tiles === '' ? null : tiles,
     },
   };

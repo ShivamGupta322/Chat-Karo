@@ -97,7 +97,10 @@ npm ci
 npm run dev      # http://localhost:5173
 ```
 
-Sign in as `alice` with `DEV_USER_PASSWORD` from your own `.env`. Nearby puts you in the chat for the area you are in.
+Open http://localhost:5173 and pick a name. Nearby creates a pseudonymous identity for this browser (there is no email or
+password), stores it on this device only, and puts you in the chat for the area you are in. Reloading signs you back in
+automatically; "Sign out" keeps the name ("Continue as ..."), and "Start over with a new name" asks first and forgets it.
+The `alice` and `bob` users from the dev seed are only for the smoke page above.
 The browser asks for permission to use your location; the chat room is named after your area code (for example
 `Area u4pruyd`). Your exact location is turned into that code inside the browser and is never sent or stored.
 Optional, dev only: set `VITE_MAP_TILE_URL` in `.env` (the line in `.env.example` uses OpenStreetMap tiles; copy it if
@@ -108,20 +111,35 @@ visible (see `.env.example`).
 Location needs a secure page: `localhost` works, but a LAN IP over plain http (for example from a phone) is
 treated as insecure and shows a message instead.
 
+Dev only: `http://localhost:5173/?identity=b` keeps a separate stored name for that window (the slot is 1-16 of
+`a-z0-9`), so two windows can be two people. A private window works too. `VITE_API_URL` (optional, default `/api`) is
+the same-origin path of the geo_service API.
+
+#### Removing test names
+
+Every test name creates a real account and profile. To remove them (replace the names):
+
+```bash
+MSYS_NO_PATHCONV=1 docker compose exec -T mongo mongosh --quiet chaterl --eval 'db.profiles.find({nickname:{$in:["Alice_1"]}},{_id:1}).toArray()'
+MSYS_NO_PATHCONV=1 docker compose exec mongooseim mongooseimctl account removeUser --user <localpart>@chaterl.localhost
+MSYS_NO_PATHCONV=1 docker compose exec -T mongo mongosh --quiet chaterl --eval 'db.profiles.deleteMany({_id:{$in:["<localpart>"]}})'
+```
+
 ### Phase 2 demo: two people, one area, then moving
 
 Room assignment is client-side and temporary here (ADR-013); the server takes over in Phase 3.
 
 1. `cp .env.example .env` and replace every `change-me`, then `docker compose up -d` and wait until
    `docker compose ps` shows all four healthy (geo_service is built from `geo_service/` on first start).
-2. `bash infra/mongooseim/dev-seed.sh` to create the `alice` and `bob` test users.
-3. `cd web && npm ci && npm run dev`, then open http://localhost:5173.
-4. Open a second window (a private one) so you have two sessions. Sign in as `alice` in one and `bob` in the other.
+2. No dev seed is needed for the web app: it creates its own names.
+3. `cd web && npm ci && npm run dev`, then open http://localhost:5173 and pick a name (for example `Alice_1`).
+4. Open a second window with `http://localhost:5173/?identity=b` (dev only: a separate stored name) or a private window,
+   and pick another name (for example `Bob_1`).
 5. In each window open "Test locations (dev)" and choose "Test spot A" (or click the map, if you set `VITE_MAP_TILE_URL`). Both are now in `Area u4pruyd`; send messages
    both ways. (Or allow your real location in both windows.)
-6. In `bob`'s window choose "Test spot B (next to A)". Bob leaves the first room (alice sees "bob left") and lands
+6. In Bob's window choose "Test spot B (next to A)". Bob leaves the first room (Alice sees "Bob_1 left") and lands
    in an empty chat for `Area u4pruye`, with its own history.
-7. Choose "Test spot A" again in bob's window: the first room's recent history comes back from the archive.
+7. Choose "Test spot A" again in Bob's window: the first room's recent history comes back from the archive.
    "Use my real location" returns to the device location.
 
 The test-location panel only exists in the dev server, not in a production build.

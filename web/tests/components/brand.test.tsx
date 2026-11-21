@@ -58,7 +58,12 @@ describe('Chat page room status', () => {
     const client = createXmppClient(createFakeTransport(), { mucDomain: 'muc.chaterl.localhost' });
     render(
       <XmppProvider client={client}>
-        <Chat mucDomain="muc.chaterl.localhost" mapTileUrl={null} />
+        <Chat
+          mucDomain="muc.chaterl.localhost"
+          mapTileUrl={null}
+          nickname="alice"
+          onSignOut={() => undefined}
+        />
       </XmppProvider>,
     );
     await act(async () => {

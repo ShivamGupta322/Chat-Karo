@@ -1,4 +1,4 @@
-import { useLayoutEffect, useRef } from "react";
+import { useLayoutEffect, useRef, type ReactNode } from "react";
 import { AppHeader } from "../components/AppHeader";
 import { AreaPanel } from "../components/AreaPanel";
 import { ConnectionBanner } from "../components/ConnectionBanner";
@@ -8,7 +8,7 @@ import { MessageList } from "../components/MessageList";
 import { OccupantList } from "../components/OccupantList";
 import { DevLocationPicker, roomJidForCell, useArea } from "../geo";
 import { useRoomStore } from "../state/room";
-import { selectSessionJid, useSessionStore } from "../state/session";
+import { useSessionStore } from "../state/session";
 import { useAreaRoom } from "../state/useAreaRoom";
 import {
   AREA_TEXT,
@@ -16,26 +16,32 @@ import {
   HISTORY_TEXT,
   describeJoinFailure,
 } from "../ui/text";
-import { localpartOf, useXmppClient } from "../xmpp";
+import { useXmppClient } from "../xmpp";
 
 export function Chat({
   mucDomain,
   mapTileUrl,
+  nickname,
+  onSignOut,
+  banner,
 }: {
   mucDomain: string;
   mapTileUrl: string | null;
+  /** The profile nickname: shown in the header and used as the MUC nick. */
+  nickname: string;
+  onSignOut: () => void;
+  banner?: ReactNode;
 }): React.JSX.Element {
   const client = useXmppClient();
   const connection = useSessionStore((s) => s.connection);
   const room = useRoomStore();
-  const jid = selectSessionJid(connection) ?? "";
   const area = useArea();
 
   // TEMPORARY (Phase 3): the client picks the room from the cell; geo_service /api/locate will replace this.
   const cell = area.state.status === "located" ? area.state.cell : null;
   // A string: useAreaRoom's effect deps compare it by value, so it is stable per cell.
   const desiredRoomJid = cell === null ? null : roomJidForCell(cell, mucDomain);
-  const { retry } = useAreaRoom(client, desiredRoomJid, localpartOf(jid));
+  const { retry } = useAreaRoom(client, desiredRoomJid, nickname);
 
   // Never show another room's data: until the store has switched to the desired room, show nothing of it.
   const current = room.roomJid !== null && room.roomJid === desiredRoomJid;
@@ -91,12 +97,7 @@ export function Chat({
 
   return (
     <div className="flex min-h-dvh flex-col md:h-dvh">
-      <AppHeader
-        connection={connection}
-        onSignOut={() => {
-          client.disconnect();
-        }}
-      />
+      <AppHeader connection={connection} name={nickname} onSignOut={onSignOut} />
       {connection.status === "reconnecting" && (
         <ConnectionBanner
           state={connection}
@@ -105,6 +106,7 @@ export function Chat({
           }}
         />
       )}
+      {banner}
       <main className="mx-auto grid w-full max-w-5xl gap-3 p-3 sm:p-4 md:min-h-0 md:flex-1 md:grid-cols-[1fr_16rem] md:grid-rows-[minmax(0,1fr)] md:items-stretch">
         <div className="grid min-w-0 gap-3 md:flex md:min-h-0 md:flex-col">
           <AreaPanel

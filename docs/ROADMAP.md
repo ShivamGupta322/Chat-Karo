@@ -62,6 +62,7 @@ Carry-forward for the next slices (from the 2a/2a+ reviews):
 - [ ] Lock down MUC: `default_room.public = false` (a public disco listing of geohash rooms would reveal
       which cells are active, a location leak) and restrict room creation to geo_service/admin
 - [x] Slice 3e-1: `POST /api/session/renew` (server, ADR-019, verified live 2026-11-21)
+- [x] Slice 3e-2: client identity (Welcome, device credential, token manager; verified live 2026-11-21)
 - [ ] Client switches to `/api/locate` for room assignment (3e-2: client identity, Welcome page, token manager; 3e-3: locate switch, server-assigned rooms)
 - **Demo:** rooms assigned by the server, recorded in MongoDB
 

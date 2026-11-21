@@ -8,7 +8,7 @@ import { describeConnectionError } from '../../src/ui/text';
 describe('describeConnectionError', () => {
   it('describes connection-lost', () => {
     expect(describeConnectionError({ reason: 'connection-lost' })).toBe(
-      'Connection lost. Please sign in again.',
+      'Connection lost. Try again.',
     );
   });
 });
@@ -37,17 +37,19 @@ describe('ConnectionStatus', () => {
 });
 
 describe('AppHeader', () => {
-  it('shows the account name, not the full address, and signs out', async () => {
+  it('shows the nickname, not an address, and signs out', async () => {
     const onSignOut = vi.fn();
     const user = userEvent.setup();
     render(
       <AppHeader
-        connection={{ status: 'connected', jid: 'alice@chaterl.localhost/1794-abc' }}
+        connection={{ status: 'connected', jid: 'u0123456789abcdef0123456789abcdef@chaterl.localhost/1794-abc' }}
+        name="Alice_1"
         onSignOut={onSignOut}
       />,
     );
-    expect(screen.getByText('alice')).toBeInTheDocument();
+    expect(screen.getByText('Alice_1')).toBeInTheDocument();
     expect(document.body.textContent).not.toContain('chaterl.localhost');
+    expect(document.body.textContent).not.toContain('u0123456789abcdef');
     expect(screen.getByRole('heading', { level: 1 })).toHaveTextContent('Nearby');
     await user.click(screen.getByRole('button', { name: 'Sign out' }));
     expect(onSignOut).toHaveBeenCalledTimes(1);

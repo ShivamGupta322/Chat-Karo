@@ -1,10 +1,23 @@
 import { act, render, screen, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
-import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi, type MockInstance } from 'vitest';
+import {
+  createCredentialStore,
+  createHttp,
+  createSessionApi,
+  createTokenManager,
+  type DeviceCredential,
+  type HttpResponseLike,
+  type TimerHandle,
+  type Timers,
+} from '../../src/api';
 import { App } from '../../src/App';
+import { initialIdentityState, useIdentityStore } from '../../src/state/identity';
+import { IdentityProvider } from '../../src/state/IdentityProvider';
+import { createIdentityController } from '../../src/state/identityController';
 import { initialRoomState, useRoomStore } from '../../src/state/room';
 import { useSessionStore } from '../../src/state/session';
-import { AREA_TEXT } from '../../src/ui/text';
+import { AREA_TEXT, IDENTITY_TEXT } from '../../src/ui/text';
 import { XmppProvider, createXmppClient } from '../../src/xmpp';
 import {
   CELL_ROOM,
@@ -22,6 +35,7 @@ import {
   type FakeGeolocation,
 } from '../helpers/fakeGeolocation';
 import { createFakeTransport } from '../helpers/fakeTransport';
+import { createMemoryStorage, type MemoryStorage } from '../helpers/memoryStorage';
 
 const presence = (nick: string, codes: string[] = [], type?: string, room = CELL_ROOM): Element =>
   presenceIn(nick, codes, type, room);
@@ -36,8 +50,86 @@ const groupchat = (
 const CELL_ROOM_B = 'g7_u4pruye@muc.chaterl.localhost';
 const SPOT_A = { lat: 57.64911, lng: 10.40744 };
 
+const DOMAIN = 'chaterl.localhost';
+const KEY = 'nearby.identity.v1';
+/** The device credential a returning user has stored; its nickname is the MUC nick in the area tests. */
+const STORED: DeviceCredential = {
+  jid: `u${'a'.repeat(32)}@${DOMAIN}`,
+  xmppPassword: `xp1_${'S'.repeat(32)}`,
+  nickname: 'alice',
+};
+/** The identity the fake server hands out on POST /api/session. */
+const NEW_JID = `u${'b'.repeat(32)}@${DOMAIN}`;
+const NEW_PASSWORD = `xp1_${'N'.repeat(32)}`;
+const TOKEN_CREATE = 'tokenCreate.payload.signature';
+const TOKEN_RENEW = 'tokenRenew.payload.signature';
+
+type Reply = HttpResponseLike | Promise<HttpResponseLike>;
+interface Req {
+  url: string;
+  body: string;
+  headers: Record<string, string>;
+}
+type Route = (req: Req) => Reply;
+
+const reply = (status: number, body: unknown, headers: Record<string, string> = {}): HttpResponseLike => ({
+  status,
+  headers: { get: (n) => headers[n.toLowerCase()] ?? null },
+  text: () => Promise.resolve(JSON.stringify(body)),
+});
+
+/** A timer set the tests advance by hand, so userEvent keeps working on real timers. */
+function manualTimers(): Timers & { advance(ms: number): Promise<void> } {
+  let now = 0;
+  let nextId = 0;
+  const pending = new Map<number, { at: number; fn: () => void }>();
+  const flush = async (): Promise<void> => {
+    for (let i = 0; i < 25; i += 1) await Promise.resolve();
+  };
+  return {
+    set(fn, ms) {
+      nextId += 1;
+      pending.set(nextId, { at: now + ms, fn });
+      return nextId as unknown as TimerHandle;
+    },
+    clear(h) {
+      pending.delete(h as unknown as number);
+    },
+    async advance(ms) {
+      const target = now + ms;
+      for (;;) {
+        const due = [...pending.entries()]
+          .filter(([, t]) => t.at <= target)
+          .sort((a, b) => a[1].at - b[1].at)[0];
+        if (!due) break;
+        pending.delete(due[0]);
+        now = due[1].at;
+        due[1].fn();
+        await flush();
+      }
+      now = target;
+      await flush();
+    },
+  };
+}
+
+interface MountOptions {
+  stored?: boolean;
+  routes?: Partial<Record<'/api/session' | '/api/session/renew', Route>>;
+  client?: Partial<Parameters<typeof createXmppClient>[1]>;
+  failStorageWrites?: boolean;
+}
+
+interface Mounted {
+  t: ReturnType<typeof createFakeTransport>;
+  storage: MemoryStorage;
+  requests: Req[];
+  timers: ReturnType<typeof manualTimers>;
+}
+
 describe('chat flow', () => {
   let geo: FakeGeolocation;
+  let controller: ReturnType<typeof createIdentityController> | null = null;
 
   /** Lets the (granted) permission query settle, then delivers a device fix. */
   async function locate(point: { lat: number; lng: number } = SPOT_A): Promise<void> {
@@ -49,142 +141,437 @@ describe('chat flow', () => {
     });
   }
 
+  /** The whole app on a fake transport, a fake network and an in-memory device store. */
+  function mountApp(o: MountOptions = {}): Mounted {
+    const t = createFakeTransport();
+    const client = createXmppClient(t, {
+      mucDomain: 'muc.chaterl.localhost',
+      random: () => 0.5,
+      ...o.client,
+    });
+    const storage = createMemoryStorage();
+    const credentials = createCredentialStore({ xmppDomain: DOMAIN, slot: null, storage: () => storage });
+    if (o.stored === true) credentials.save(STORED);
+    if (o.failStorageWrites === true) storage.failWrites();
+
+    const requests: Req[] = [];
+    const routes: Record<string, Route> = {
+      '/api/session': (req) => {
+        const nickname = (JSON.parse(req.body) as { nickname: string }).nickname;
+        return reply(201, {
+          jid: NEW_JID,
+          xmpp_password: NEW_PASSWORD,
+          nickname,
+          token: TOKEN_CREATE,
+          token_type: 'Bearer',
+          expires_in: 3600,
+        });
+      },
+      '/api/session/renew': () =>
+        reply(200, { nickname: STORED.nickname, token: TOKEN_RENEW, token_type: 'Bearer', expires_in: 3600 }),
+      ...o.routes,
+    };
+    const timers = manualTimers();
+    const http = createHttp({
+      baseUrl: '/api',
+      timers,
+      fetch: (url, init) => {
+        requests.push({
+          url,
+          body: typeof init.body === 'string' ? init.body : '',
+          headers: init.headers as Record<string, string>,
+        });
+        const route = routes[url];
+        if (!route) return Promise.resolve(reply(404, {}));
+        try {
+          return Promise.resolve(route(requests[requests.length - 1] as Req));
+        } catch (e) {
+          return Promise.reject(e instanceof Error ? e : new Error('route failed'));
+        }
+      },
+    });
+    const session = createSessionApi(http, { xmppDomain: DOMAIN });
+    const tokens = createTokenManager({ renew: session.renew, timers });
+    controller = createIdentityController({ client, credentials, session, tokens });
+    controller.start();
+    render(
+      <XmppProvider client={client}>
+        <IdentityProvider controller={controller}>
+          <App mucDomain="muc.chaterl.localhost" mapTileUrl={null} />
+        </IdentityProvider>
+      </XmppProvider>,
+    );
+    return { t, storage, requests, timers };
+  }
+
+  /** Reports the stored identity's connection as up and waits for the chat. */
+  async function connectStored(t: ReturnType<typeof createFakeTransport>): Promise<void> {
+    act(() => {
+      t.pushStatus({ kind: 'connected', jid: `${STORED.jid}/r1` });
+    });
+    await screen.findByRole('button', { name: IDENTITY_TEXT.signOut });
+  }
+
+  async function signInAndJoin(t: ReturnType<typeof createFakeTransport>): Promise<void> {
+    await connectStored(t);
+    await locate();
+    act(() => {
+      t.pushStanza(presence('alice', ['110']));
+    });
+  }
+
+  const typeName = async (
+    user: ReturnType<typeof userEvent.setup>,
+    name: string,
+  ): Promise<void> => {
+    await user.type(screen.getByLabelText(IDENTITY_TEXT.nicknameLabel), name);
+    await user.click(screen.getByRole('button', { name: IDENTITY_TEXT.submit }));
+  };
+
   beforeEach(() => {
     useSessionStore.setState({ connection: { status: 'idle' } });
     useRoomStore.setState({ ...initialRoomState });
+    useIdentityStore.setState({ ...initialIdentityState });
     geo = createFakeGeolocation();
     installGeo({ geolocation: geo, permissions: createFakePermissions('granted'), secure: true });
   });
 
   afterEach(() => {
+    controller?.dispose();
+    controller = null;
     vi.useRealTimers();
     uninstallGeo();
   });
 
-  it('logs in, joins a room, sees occupants and sends a message', async () => {
-    const t = createFakeTransport();
-    const client = createXmppClient(t, { mucDomain: 'muc.chaterl.localhost' });
-    const user = userEvent.setup({ delay: null });
-    render(
-      <XmppProvider client={client}>
-        <App xmppDomain="chaterl.localhost" mucDomain="muc.chaterl.localhost" mapTileUrl={null} />
-      </XmppProvider>,
-    );
+  describe('identity', () => {
+    it('onboards a new name, stores it before connecting, joins with the nickname and chats', async () => {
+      const { t, storage, requests } = mountApp();
+      const user = userEvent.setup({ delay: null });
+      // Welcome: no stored identity, so a name form and no connection.
+      expect(screen.getByRole('heading', { level: 2, name: IDENTITY_TEXT.heading })).toBeInTheDocument();
+      expect(t.connectCalls).toHaveLength(0);
+      await typeName(user, 'Alice_1');
 
-    // 1. log in
-    await user.type(screen.getByLabelText('Password'), 'pw');
-    await user.click(screen.getByRole('button', { name: 'Sign in' }));
-    expect(t.connectCalls[0]?.jid).toBe('alice@chaterl.localhost');
-    act(() => {
-      t.pushStatus({ kind: 'connected', jid: 'alice@chaterl.localhost/r1' });
-    });
-    expect(await screen.findByRole('button', { name: 'Sign out' })).toBeInTheDocument();
-
-    // 2. located -> auto-join the cell room
-    await locate();
-    expect(screen.getByText(/You're in|Joining/)).toBeInTheDocument();
-    const join = t.sent.find((e) => e.getAttribute('to') === `${CELL_ROOM}/alice`);
-    expect(join).toBeDefined();
-    act(() => {
-      t.pushStanza(presence('bob'));
-      t.pushStanza(presence('alice', ['110']));
-    });
-    const occupants = await screen.findByRole('heading', { name: /People here/ });
-    expect(occupants).toHaveTextContent(/People here.*2/);
-    const section = occupants.closest('section');
-    expect(section).not.toBeNull();
-    if (section) {
-      expect(within(section).getByText('bob')).toBeInTheDocument();
-      expect(within(section).getByText('(you)', { exact: false })).toBeInTheDocument();
-    }
-
-    // 3. send and see the echo
-    await user.type(screen.getByLabelText('Message'), 'hello world{Enter}');
-    const sent = t.sent.at(-1);
-    expect(sent?.getAttribute('type')).toBe('groupchat');
-    expect(sent?.querySelector('body')?.textContent).toBe('hello world');
-    expect(within(screen.getByRole('log')).queryByText('hello world')).toBeNull();
-    act(() => {
-      t.pushStanza(groupchat('alice', 'hello world', '', 'echo1'));
-    });
-    expect(within(screen.getByRole('log')).getByText('hello world')).toBeInTheDocument();
-
-    // 4. a rejected message produces a notice (server text is not rendered)
-    act(() => {
-      t.pushStanza(
-        parse(
-          `<message from="${CELL_ROOM}" type="error" id="x"><body>again</body><error code="404" type="cancel"><item-not-found xmlns="urn:ietf:params:xml:ns:xmpp-stanzas"/><text xmlns="urn:ietf:params:xml:ns:xmpp-stanzas">This room is locked</text></error></message>`,
-        ),
+      expect(requests).toHaveLength(1);
+      expect(requests[0]?.url).toBe('/api/session');
+      expect(requests[0]?.body).toBe('{"nickname":"Alice_1"}');
+      expect(storage.getItem(KEY)).toBe(
+        `{"v":1,"jid":"${NEW_JID}","xmppPassword":"${NEW_PASSWORD}","nickname":"Alice_1"}`,
       );
-    });
-    const log = screen.getByRole('log');
-    expect(
-      within(log).getByText('Message not delivered: the room is unavailable or locked'),
-    ).toBeInTheDocument();
-    expect(within(log).queryByText(/This room is locked/)).toBeNull();
-    // Full UI flow; jsdom + userEvent can exceed the 5 s default on slower machines.
-  }, 20_000);
+      expect(storage.getItem(KEY)).not.toContain(TOKEN_CREATE);
+      expect(t.connectCalls).toEqual([{ jid: NEW_JID, password: NEW_PASSWORD }]);
+      // The first token was adopted, so there is no renew yet.
+      expect(requests.filter((r) => r.url === '/api/session/renew')).toHaveLength(0);
 
-  function mount(
-    extra: Partial<Parameters<typeof createXmppClient>[1]> = {},
-  ): ReturnType<typeof createFakeTransport> {
-    const t = createFakeTransport();
-    const client = createXmppClient(t, {
-      mucDomain: 'muc.chaterl.localhost',
-      random: () => 0.5,
-      ...extra,
-    });
-    render(
-      <XmppProvider client={client}>
-        <App xmppDomain="chaterl.localhost" mucDomain="muc.chaterl.localhost" mapTileUrl={null} />
-      </XmppProvider>,
-    );
-    return t;
-  }
+      act(() => {
+        t.pushStatus({ kind: 'connected', jid: `${NEW_JID}/r1` });
+      });
+      const signOut = await screen.findByRole('button', { name: 'Sign out' });
+      const header = signOut.closest('header');
+      expect(header).not.toBeNull();
+      if (header) expect(within(header).getByText('Alice_1')).toBeInTheDocument();
+      expect(document.body.textContent).not.toContain(NEW_JID.split('@')[0]);
 
-  async function signInAndJoin(
-    t: ReturnType<typeof createFakeTransport>,
-    user: ReturnType<typeof userEvent.setup>,
-  ): Promise<void> {
-    await user.type(screen.getByLabelText('Password'), 'pw');
-    await user.click(screen.getByRole('button', { name: 'Sign in' }));
-    act(() => {
-      t.pushStatus({ kind: 'connected', jid: 'alice@chaterl.localhost/r1' });
+      await locate();
+      expect(screen.getByText(/You're in|Joining/)).toBeInTheDocument();
+      // The MUC nick is the profile nickname, not the account's localpart.
+      expect(t.sent.find((e) => e.getAttribute('to') === `${CELL_ROOM}/Alice_1`)).toBeDefined();
+      expect(t.sent.some((e) => (e.getAttribute('to') ?? '').includes(NEW_JID.split('@')[0] ?? '?'))).toBe(false);
+      act(() => {
+        t.pushStanza(presence('bob'));
+        t.pushStanza(presence('Alice_1', ['110']));
+      });
+      const occupants = await screen.findByRole('heading', { name: /People here/ });
+      expect(occupants).toHaveTextContent(/People here.*2/);
+      const section = occupants.closest('section');
+      expect(section).not.toBeNull();
+      if (section) {
+        expect(within(section).getByText('bob')).toBeInTheDocument();
+        expect(within(section).getByText('(you)', { exact: false })).toBeInTheDocument();
+      }
+
+      // send and see the echo
+      await user.type(screen.getByLabelText('Message'), 'hello world{Enter}');
+      const sent = t.sent.at(-1);
+      expect(sent?.getAttribute('type')).toBe('groupchat');
+      expect(sent?.querySelector('body')?.textContent).toBe('hello world');
+      expect(within(screen.getByRole('log')).queryByText('hello world')).toBeNull();
+      act(() => {
+        t.pushStanza(groupchat('Alice_1', 'hello world', '', 'echo1'));
+      });
+      expect(within(screen.getByRole('log')).getByText('hello world')).toBeInTheDocument();
+
+      // a rejected message produces a notice (server text is not rendered)
+      act(() => {
+        t.pushStanza(
+          parse(
+            `<message from="${CELL_ROOM}" type="error" id="x"><body>again</body><error code="404" type="cancel"><item-not-found xmlns="urn:ietf:params:xml:ns:xmpp-stanzas"/><text xmlns="urn:ietf:params:xml:ns:xmpp-stanzas">This room is locked</text></error></message>`,
+          ),
+        );
+      });
+      const log = screen.getByRole('log');
+      expect(
+        within(log).getByText('Message not delivered: the room is unavailable or locked'),
+      ).toBeInTheDocument();
+      expect(within(log).queryByText(/This room is locked/)).toBeNull();
+    }, 20_000);
+
+    it('a returning device shows no form: it connects and renews before any user action', () => {
+      const { t, requests } = mountApp({ stored: true });
+      expect(screen.queryByLabelText(IDENTITY_TEXT.nicknameLabel)).toBeNull();
+      expect(screen.getByRole('status')).toHaveTextContent('Signing you in as alice…');
+      expect(t.connectCalls).toEqual([{ jid: STORED.jid, password: STORED.xmppPassword }]);
+      expect(requests).toHaveLength(1);
+      expect(requests[0]?.url).toBe('/api/session/renew');
+      expect(requests[0]?.body).toBe(`{"jid":"${STORED.jid}","xmpp_password":"${STORED.xmppPassword}"}`);
+      expect(requests[0]?.headers).not.toHaveProperty('authorization');
     });
-    await screen.findByRole('button', { name: 'Sign out' });
-    await locate();
-    act(() => {
-      t.pushStanza(presence('alice', ['110']));
+
+    it('sign out, then "Continue as" reconnects with the same credential', async () => {
+      const { t, storage } = mountApp({ stored: true });
+      const user = userEvent.setup({ delay: null });
+      await connectStored(t);
+      await user.click(screen.getByRole('button', { name: 'Sign out' }));
+      expect(t.disconnectCalls).toEqual(['user']);
+      expect(screen.getByRole('heading', { level: 2, name: IDENTITY_TEXT.returningHeading })).toHaveFocus();
+      // Still closing: the choice is shown but cannot be used yet.
+      expect(screen.getByRole('button', { name: 'Continue as alice' })).toHaveAttribute('aria-disabled', 'true');
+      act(() => {
+        t.pushStatus({ kind: 'disconnected' });
+      });
+      expect(screen.getByRole('button', { name: 'Continue as alice' })).toHaveAttribute('aria-disabled', 'false');
+      expect(storage.getItem(KEY)).not.toBeNull();
+
+      await user.click(screen.getByRole('button', { name: 'Continue as alice' }));
+      expect(t.connectCalls).toHaveLength(2);
+      expect(t.connectCalls[1]).toEqual({ jid: STORED.jid, password: STORED.xmppPassword });
+      await connectStored(t);
+      expect(screen.getByLabelText('Message')).toBeInTheDocument();
+    }, 20_000);
+
+    it('start over asks first: Escape cancels, confirming clears the stored name and shows the form', async () => {
+      const { t, storage } = mountApp({ stored: true });
+      const user = userEvent.setup({ delay: null });
+      await connectStored(t);
+      await user.click(screen.getByRole('button', { name: 'Sign out' }));
+      act(() => {
+        t.pushStatus({ kind: 'disconnected' });
+      });
+      const trigger = screen.getByRole('button', { name: IDENTITY_TEXT.startOver });
+      await user.click(trigger);
+      expect(screen.getByRole('alertdialog')).toBeInTheDocument();
+      expect(screen.getByRole('button', { name: IDENTITY_TEXT.cancel })).toHaveFocus();
+      await user.keyboard('{Escape}');
+      expect(screen.queryByRole('alertdialog')).toBeNull();
+      expect(trigger).toHaveFocus();
+      expect(storage.getItem(KEY)).not.toBeNull();
+
+      await user.click(trigger);
+      await user.click(screen.getByRole('button', { name: IDENTITY_TEXT.confirmAction }));
+      expect(storage.getItem(KEY)).toBeNull();
+      expect(screen.getByLabelText(IDENTITY_TEXT.nicknameLabel)).toBeInTheDocument();
+      expect(screen.getByRole('heading', { level: 2, name: IDENTITY_TEXT.heading })).toHaveFocus();
+      expect(t.connectCalls).toHaveLength(1);
+    }, 20_000);
+
+    it('a taken name shows the field error and stores and connects nothing', async () => {
+      const { t, storage } = mountApp({
+        routes: { '/api/session': () => reply(409, { error: 'nickname_taken' }) },
+      });
+      const user = userEvent.setup({ delay: null });
+      await typeName(user, 'Alice_1');
+      expect(await screen.findByText(IDENTITY_TEXT.errorTaken)).toBeInTheDocument();
+      expect(screen.getByLabelText(IDENTITY_TEXT.nicknameLabel)).toHaveAttribute('aria-invalid', 'true');
+      expect(storage.getItem(KEY)).toBeNull();
+      expect(t.connectCalls).toHaveLength(0);
+    }, 20_000);
+
+    it.each<[string, NonNullable<MountOptions['routes']>]>([
+      ['a 503', { '/api/session': () => reply(503, { error: 'service_unavailable' }) }],
+      [
+        'a rejected fetch',
+        {
+          '/api/session': () => {
+            throw new TypeError('Failed to fetch');
+          },
+        },
+      ],
+    ])('%s shows the unavailable alert', async (_name, routes) => {
+      const { t, storage } = mountApp({ routes });
+      const user = userEvent.setup({ delay: null });
+      await typeName(user, 'Alice_1');
+      expect(await screen.findByRole('alert')).toHaveTextContent(
+        "Nearby can't create names right now. Try again in a few seconds.",
+      );
+      expect(storage.getItem(KEY)).toBeNull();
+      expect(t.connectCalls).toHaveLength(0);
+    }, 20_000);
+
+    it('a create request that hangs for 15 s shows the unavailable alert', async () => {
+      const { t, timers } = mountApp({
+        routes: { '/api/session': () => new Promise<HttpResponseLike>(() => undefined) },
+      });
+      const user = userEvent.setup({ delay: null });
+      await typeName(user, 'Alice_1');
+      expect(screen.getByRole('button', { name: IDENTITY_TEXT.creating })).toHaveAttribute('aria-disabled', 'true');
+      await act(async () => {
+        await timers.advance(14_999);
+      });
+      expect(screen.queryByRole('alert')).toBeNull();
+      await act(async () => {
+        await timers.advance(1);
+      });
+      expect(screen.getByRole('alert')).toHaveTextContent("Nearby can't create names right now.");
+      expect(t.connectCalls).toHaveLength(0);
+    }, 20_000);
+
+    it('an auth failure for a stored name shows the error, Try again and Start over, and wipes nothing', async () => {
+      const { t, storage } = mountApp({ stored: true });
+      const user = userEvent.setup({ delay: null });
+      act(() => {
+        t.pushStatus({ kind: 'failed', reason: 'auth-failed' });
+      });
+      expect(screen.getByRole('alert')).toHaveTextContent("Nearby couldn't sign you in with this name.");
+      expect(screen.getByRole('button', { name: IDENTITY_TEXT.startOver })).toBeInTheDocument();
+      await user.click(screen.getByRole('button', { name: IDENTITY_TEXT.tryAgain }));
+      expect(t.connectCalls).toHaveLength(2);
+      expect(storage.getItem(KEY)).not.toBeNull();
+    }, 20_000);
+
+    it('a renew 401 while connected keeps the chat, shows the notice and wipes nothing', async () => {
+      const { t, storage } = mountApp({
+        stored: true,
+        routes: { '/api/session/renew': () => reply(401, { error: 'invalid_credentials' }) },
+      });
+      await connectStored(t);
+      expect(await screen.findByRole('alert')).toHaveTextContent(IDENTITY_TEXT.identityInvalid);
+      expect(screen.getByRole('button', { name: IDENTITY_TEXT.identityInvalidAction })).toBeInTheDocument();
+      expect(t.disconnectCalls).toEqual([]);
+      expect(screen.getByLabelText('Message')).toBeInTheDocument();
+      expect(storage.getItem(KEY)).not.toBeNull();
+    }, 20_000);
+
+    it('a renew 503 while connected is silent, keeps XMPP up and retries after 5 s', async () => {
+      const { t, requests, timers } = mountApp({
+        stored: true,
+        routes: { '/api/session/renew': () => reply(503, { error: 'service_unavailable' }) },
+      });
+      await connectStored(t);
+      await act(async () => {
+        await timers.advance(0);
+      });
+      const renews = (): number => requests.filter((r) => r.url === '/api/session/renew').length;
+      expect(renews()).toBe(1);
+      expect(screen.queryByText(IDENTITY_TEXT.identityInvalid)).toBeNull();
+      expect(screen.queryByText(IDENTITY_TEXT.notRemembered)).toBeNull();
+      await act(async () => {
+        await timers.advance(4_999);
+      });
+      expect(renews()).toBe(1);
+      await act(async () => {
+        await timers.advance(1);
+      });
+      expect(renews()).toBe(2);
+      expect(t.disconnectCalls).toEqual([]);
+      expect(screen.getByLabelText('Message')).toBeInTheDocument();
+    }, 20_000);
+
+    it('a failed storage write still connects and says the name will not be remembered', async () => {
+      const { t } = mountApp({ failStorageWrites: true });
+      const user = userEvent.setup({ delay: null });
+      await typeName(user, 'Alice_1');
+      expect(t.connectCalls).toEqual([{ jid: NEW_JID, password: NEW_PASSWORD }]);
+      act(() => {
+        t.pushStatus({ kind: 'connected', jid: `${NEW_JID}/r1` });
+      });
+      expect(await screen.findByText(IDENTITY_TEXT.notRemembered)).toBeInTheDocument();
+    }, 20_000);
+
+    describe('privacy', () => {
+      const spies = (): MockInstance[] =>
+        (['log', 'info', 'warn', 'error', 'debug'] as const).map((m) =>
+          vi.spyOn(console, m).mockImplementation(() => undefined),
+        );
+      const printed = (all: MockInstance[]): string =>
+        all
+          .flatMap((s) => s.mock.calls as unknown[][])
+          .map((args) => args.map((a) => (typeof a === 'string' ? a : JSON.stringify(a))).join(' '))
+          .join('\n');
+      const SECRETS = [NEW_PASSWORD, STORED.xmppPassword, TOKEN_CREATE, TOKEN_RENEW, 'Bearer'];
+
+      afterEach(() => {
+        vi.restoreAllMocks();
+      });
+
+      it('onboarding never logs the password or a token, and never stores a token', async () => {
+        const all = spies();
+        const { t, storage } = mountApp();
+        const user = userEvent.setup({ delay: null });
+        await typeName(user, 'Alice_1');
+        act(() => {
+          t.pushStatus({ kind: 'connected', jid: `${NEW_JID}/r1` });
+        });
+        await screen.findByRole('button', { name: 'Sign out' });
+        const out = printed(all);
+        for (const s of SECRETS) expect(out).not.toContain(s);
+        expect(storage.getItem(KEY)).not.toContain(TOKEN_CREATE);
+        expect(JSON.stringify(useIdentityStore.getState())).not.toMatch(/xp1_|tokenCreate|jid/);
+      }, 20_000);
+
+      it('a returning device never logs the password or a token', async () => {
+        const all = spies();
+        const { t, storage } = mountApp({ stored: true });
+        await connectStored(t);
+        for (const s of SECRETS) expect(printed(all)).not.toContain(s);
+        expect(storage.getItem(KEY)).not.toContain(TOKEN_RENEW);
+        expect(JSON.stringify(useIdentityStore.getState())).not.toMatch(/xp1_|tokenRenew|jid/);
+      }, 20_000);
+
+      it('a renew 401 never logs the password', async () => {
+        const all = spies();
+        const { t } = mountApp({
+          stored: true,
+          routes: { '/api/session/renew': () => reply(401, { error: 'invalid_credentials' }) },
+        });
+        await connectStored(t);
+        await screen.findByRole('alert');
+        for (const s of SECRETS) expect(printed(all)).not.toContain(s);
+      }, 20_000);
     });
-  }
+  });
 
   it('survives a dropped connection: banner, disabled composer, then rejoin keeps the timeline', async () => {
-    const t = mount();
-    const user = userEvent.setup({ delay: null });
-    await signInAndJoin(t, user);
+    const { t, timers } = mountApp({ stored: true });
+    await signInAndJoin(t);
     act(() => {
       t.pushStanza(groupchat('bob', 'still here', '', 'm-keep'));
     });
     expect(within(screen.getByRole('log')).getByText('still here')).toBeInTheDocument();
+    // The renew fired on start-up: the token is valid, and a dropped connection must not stop it.
+    await act(async () => {
+      await timers.advance(0);
+    });
+    expect(useIdentityStore.getState().token).toBe('valid');
 
     vi.useFakeTimers();
     act(() => {
       t.pushStatus({ kind: 'disconnected' });
     });
-    // Chat stays mounted (no bounce to the login form).
+    // Chat stays mounted (no bounce to Welcome).
     expect(screen.getByRole('button', { name: 'Sign out' })).toBeInTheDocument();
     expect(screen.getByText('Connection lost.')).toBeInTheDocument();
     expect(screen.getByRole('button', { name: 'Try now' })).toBeInTheDocument();
     expect(screen.getByText('Reconnecting…')).toBeInTheDocument();
     expect(screen.getByLabelText('Message')).toBeDisabled();
     expect(within(screen.getByRole('log')).getByText('still here')).toBeInTheDocument();
+    expect(useIdentityStore.getState().token).toBe('valid');
 
     act(() => {
       vi.advanceTimersByTime(1000);
     });
     act(() => {
       t.pushStatus({ kind: 'connecting' });
-      t.pushStatus({ kind: 'connected', jid: 'alice@chaterl.localhost/r2' });
+      t.pushStatus({ kind: 'connected', jid: `${STORED.jid}/r2` });
     });
     act(() => {
       t.pushStanza(presence('alice', ['110']));
@@ -194,10 +581,10 @@ describe('chat flow', () => {
     expect(within(screen.getByRole('log')).getByText('still here')).toBeInTheDocument();
   }, 20_000);
 
-  it('signing out while reconnecting shows the login form and the next session starts clean', async () => {
-    const t = mount();
+  it('signing out while reconnecting shows the returning card and the next session starts clean', async () => {
+    const { t } = mountApp({ stored: true });
     const user = userEvent.setup({ delay: null });
-    await signInAndJoin(t, user);
+    await signInAndJoin(t);
     act(() => {
       t.pushStanza(presence('carol'));
       t.pushStanza(groupchat('bob', 'old message', '', 'm-old'));
@@ -210,10 +597,12 @@ describe('chat flow', () => {
     });
     expect(screen.getByText('Connection lost.')).toBeInTheDocument();
     await user.click(screen.getByRole('button', { name: 'Sign out' }));
-    expect(screen.getByLabelText('Password')).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Continue as alice' })).toBeInTheDocument();
     expect(t.connectCalls).toHaveLength(1);
 
-    await signInAndJoin(t, user);
+    await user.click(screen.getByRole('button', { name: 'Continue as alice' }));
+    expect(t.connectCalls).toHaveLength(2);
+    await signInAndJoin(t);
     expect(screen.queryByText('carol joined')).toBeNull();
     expect(screen.queryByText('old message')).toBeNull();
   }, 20_000);
@@ -242,18 +631,16 @@ describe('chat flow', () => {
       );
 
     it('placing the user in a located area joins that cell room and says so', async () => {
-      const t = mount();
-      const user = userEvent.setup({ delay: null });
-      await signInAndJoin(t, user);
+      const { t } = mountApp({ stored: true });
+      await signInAndJoin(t);
       expect(joinsTo(t)).toEqual([`${CELL_ROOM}/alice`]);
       expect(screen.getByText(/You're in/)).toHaveTextContent("You're in Area u4pruyd as alice");
       expect(document.body.textContent).not.toContain('@muc');
     }, 20_000);
 
     it('a test spot in another cell leaves the old room and joins the new one with nothing carried over', async () => {
-      const t = mount({ mamPageSize: 2 });
-      const user = userEvent.setup({ delay: null });
-      await signInAndJoin(t, user);
+      const { t } = mountApp({ stored: true, client: { mamPageSize: 2 } });
+      await signInAndJoin(t);
       act(() => {
         t.pushStanza(presence('bob'));
         t.pushStanza(
@@ -321,9 +708,8 @@ describe('chat flow', () => {
     }, 20_000);
 
     it('a switch while reconnecting joins only the new room, once, after the connection is back', async () => {
-      const t = mount();
-      const user = userEvent.setup({ delay: null });
-      await signInAndJoin(t, user);
+      const { t } = mountApp({ stored: true });
+      await signInAndJoin(t);
       vi.useFakeTimers();
       act(() => {
         t.pushStatus({ kind: 'disconnected' });
@@ -338,7 +724,7 @@ describe('chat flow', () => {
       });
       act(() => {
         t.pushStatus({ kind: 'connecting' });
-        t.pushStatus({ kind: 'connected', jid: 'alice@chaterl.localhost/r2' });
+        t.pushStatus({ kind: 'connected', jid: `${STORED.jid}/r2` });
       });
       expect(joinsTo(t)).toEqual([`${CELL_ROOM}/alice`, `${CELL_ROOM_B}/alice`]);
       expect(leavesTo(t)).toEqual([]);
@@ -351,14 +737,8 @@ describe('chat flow', () => {
         permissions: createFakePermissions('denied'),
         secure: true,
       });
-      const t = mount();
-      const user = userEvent.setup({ delay: null });
-      await user.type(screen.getByLabelText('Password'), 'pw');
-      await user.click(screen.getByRole('button', { name: 'Sign in' }));
-      act(() => {
-        t.pushStatus({ kind: 'connected', jid: 'alice@chaterl.localhost/r1' });
-      });
-      await screen.findByRole('button', { name: 'Sign out' });
+      const { t } = mountApp({ stored: true });
+      await connectStored(t);
       await act(async () => {
         await Promise.resolve();
       });
@@ -375,9 +755,8 @@ describe('chat flow', () => {
     }, 20_000);
 
     it('a re-render with a new-but-equal area state sends no stanzas', async () => {
-      const t = mount();
-      const user = userEvent.setup({ delay: null });
-      await signInAndJoin(t, user);
+      const { t } = mountApp({ stored: true });
+      await signInAndJoin(t);
       const before = t.sent.length;
       act(() => {
         geo.emit(57.6492, 10.4075); // same cell u4pruyd: a new fix, an equal area
@@ -389,14 +768,9 @@ describe('chat flow', () => {
     }, 20_000);
 
     it('"Join again" sits outside the status region, retries once and hands focus to the status line', async () => {
-      const t = mount();
+      const { t } = mountApp({ stored: true });
       const user = userEvent.setup({ delay: null });
-      await user.type(screen.getByLabelText('Password'), 'pw');
-      await user.click(screen.getByRole('button', { name: 'Sign in' }));
-      act(() => {
-        t.pushStatus({ kind: 'connected', jid: 'alice@chaterl.localhost/r1' });
-      });
-      await screen.findByRole('button', { name: 'Sign out' });
+      await connectStored(t);
       await locate();
       act(() => {
         t.pushStanza(presenceError('forbidden', CELL_ROOM));
@@ -413,9 +787,8 @@ describe('chat flow', () => {
     }, 20_000);
 
     it('after leaving the room the status line says so', async () => {
-      const t = mount();
-      const user = userEvent.setup({ delay: null });
-      await signInAndJoin(t, user);
+      const { t } = mountApp({ stored: true });
+      await signInAndJoin(t);
       act(() => {
         t.pushStanza(presence('alice', ['110'], 'unavailable'));
       });
@@ -423,9 +796,8 @@ describe('chat flow', () => {
     }, 20_000);
 
     it('privacy: no coordinate or location field is ever put on the wire', async () => {
-      const t = mount();
-      const user = userEvent.setup({ delay: null });
-      await signInAndJoin(t, user);
+      const { t } = mountApp({ stored: true });
+      await signInAndJoin(t);
       pickSpotB();
       act(() => {
         t.pushStanza(presence('alice', ['110'], undefined, CELL_ROOM_B));
@@ -485,9 +857,8 @@ describe('chat flow', () => {
     };
 
     it('shows the last messages from the archive with the divider, and de-dupes a later live copy', async () => {
-      const t = mount();
-      const user = userEvent.setup({ delay: null });
-      await signInAndJoin(t, user);
+      const { t } = mountApp({ stored: true });
+      await signInAndJoin(t);
       expect(t.iqs).toHaveLength(1);
       expect(screen.getByText('Loading recent messages…', { selector: 'p' })).toBeInTheDocument();
       expect(screen.getByRole('log')).toHaveAttribute('aria-busy', 'true');
@@ -517,9 +888,9 @@ describe('chat flow', () => {
     }, 20_000);
 
     it('shows a retry when history cannot load and asks again on "Try again"', async () => {
-      const t = mount();
+      const { t } = mountApp({ stored: true });
       const user = userEvent.setup({ delay: null });
-      await signInAndJoin(t, user);
+      await signInAndJoin(t);
       await act(async () => {
         t.resolveIq(0, { ok: false, condition: 'resource-constraint' });
         await Promise.resolve();
@@ -538,9 +909,8 @@ describe('chat flow', () => {
     }, 20_000);
 
     it('after a reconnect, fetches only what was missed, forward from the last id, without duplicates', async () => {
-      const t = mount();
-      const user = userEvent.setup({ delay: null });
-      await signInAndJoin(t, user);
+      const { t } = mountApp({ stored: true });
+      await signInAndJoin(t);
       pushResult(t, 0, 'H1', 'bob', 'before the outage');
       await answer(t, 0, true, 'H1');
 
@@ -553,7 +923,7 @@ describe('chat flow', () => {
       });
       act(() => {
         t.pushStatus({ kind: 'connecting' });
-        t.pushStatus({ kind: 'connected', jid: 'alice@chaterl.localhost/r2' });
+        t.pushStatus({ kind: 'connected', jid: `${STORED.jid}/r2` });
       });
       act(() => {
         t.pushStanza(presence('alice', ['110']));
@@ -598,9 +968,9 @@ describe('chat flow', () => {
         t: ReturnType<typeof createFakeTransport>;
         user: ReturnType<typeof userEvent.setup>;
       }> {
-        const t = mount({ mamPageSize: 2 });
+        const { t } = mountApp({ stored: true, client: { mamPageSize: 2 } });
         const user = userEvent.setup({ delay: null });
-        await signInAndJoin(t, user);
+        await signInAndJoin(t);
         expect(screen.queryByRole('button', BUTTON)).toBeNull();
         pushResult(t, 0, 'H3', 'bob', 'body H3');
         pushResult(t, 0, 'H4', 'bob', 'body H4');

@@ -48,6 +48,17 @@ In production a reverse proxy (Caddy or nginx) terminates TLS and routes `/api` 
    an active profile, then the admin `checkPassword`, then a fresh token; every credential failure is one 401. A lost device
    is a new identity.
 2. Client connects to `wss://…/ws-xmpp` with Strophe.js and authenticates (SASL) with `jid` + `xmpp_password`.
+3. Client side (3e-2, ADR-019): the device credential `{v:1, jid, xmppPassword, nickname}` is stored in `localStorage`
+   (`nearby.identity.v1`, only by `api/deviceCredential.ts`) **before** the client connects, so a crash after the
+   account exists cannot orphan it. The JWT is memory-only: it never reaches storage, Zustand or the console.
+4. On reload the stored credential connects XMPP and renews the token in parallel, before the first render, so there is
+   no flash of the Welcome page. A first-time visitor sees the nickname form; "Sign out" keeps the credential and shows
+   "Continue as X"; "Start over" asks first (an `alertdialog`) and is the only thing that deletes it.
+5. A token manager (`api/tokenManager.ts`) renews at 80% of `expires_in`, single-flights renews and backs off
+   5, 10, 20, 30 s (or the server's `retry-after`, whichever is longer), never while offline and at once on the
+   window `online` event. A renew failure never disconnects XMPP: a 401 only shows a notice with "Start over".
+   `/api/locate` (3e-3) will call it through `withToken`.
+6. The MUC nick is the profile nickname, not the localpart (`u<32 hex>` is 33 characters, over the 32-character nick limit).
 
 ### Locate & join
 1. Client gets `{lat, lng, accuracy}` from `navigator.geolocation.watchPosition`.
@@ -238,11 +249,17 @@ web/src/
 │                cell, never the clicked point), DevMapBoundary.tsx (error boundary), decodeGeohashBounds/wrapLng in
 │                geohash.ts, index.ts (the only public entry; coordinates never leave geo/;
 │                hysteresis arrives in Phase 4)
-├── api/         geoService.ts (typed fetch wrapper)
-├── state/       Zustand stores: session, room, messages, presence; useAreaRoom.ts (keeps the client in the one desired room)
+├── api/         the only place that makes network requests (a leaf: imports nothing from the rest of src/; lint-enforced):
+│                http.ts (createHttp: the only fetch caller, timeout/abort, never throws), session.ts (create / renew,
+│                response validation), tokenManager.ts (memory-only JWT, renew at 80%, getToken / withToken),
+│                deviceCredential.ts (the only browser-storage user), nickname.ts, identityRules.ts (shared shape rules),
+│                devIdentitySlot.ts (dev only: ?identity=<slot>), index.ts (public entry)
+├── state/       Zustand stores: session, room, identity (nickname, intent, token status; never a password or token),
+│                messages, presence; identityController.ts (device identity lifecycle, outside React), IdentityProvider.tsx,
+│                useAreaRoom.ts (keeps the client in the one desired room)
 ├── components/  MessageList (+ scrollAnchor.ts: keeps scroll position when earlier messages load above),
 │                Composer, OccupantList, AreaPanel, RangeSlider, RoomMap, ReportDialog
-└── pages/       Onboarding, Chat, Map
+└── pages/       Welcome (new / returning / connecting), Chat
 ```
 
 State flow: `useLocation` → `/api/locate` → room store updates `currentRoomJid` → xmpp `muc` effect

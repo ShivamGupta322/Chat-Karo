@@ -2,77 +2,10 @@ import { render, screen, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { describe, expect, it, vi } from 'vitest';
 import { Composer } from '../../src/components/Composer';
-import { LoginForm } from '../../src/components/LoginForm';
 import { MessageList } from '../../src/components/MessageList';
 import { OccupantList } from '../../src/components/OccupantList';
 import type { TimelineItem } from '../../src/state/room';
 import type { SendResult } from '../../src/xmpp';
-
-const DOMAIN = 'chaterl.localhost';
-
-function renderLogin(props: Partial<React.ComponentProps<typeof LoginForm>> = {}) {
-  const onSubmit = vi.fn();
-  render(
-    <LoginForm
-      domain={DOMAIN}
-      defaultUsername="alice"
-      busy={false}
-      error={null}
-      onSubmit={onSubmit}
-      {...props}
-    />,
-  );
-  return onSubmit;
-}
-
-describe('LoginForm', () => {
-  it('has labelled inputs and a page heading', () => {
-    renderLogin();
-    expect(screen.getByRole('heading', { level: 1 })).toHaveTextContent('Nearby');
-    expect(screen.getByLabelText('Username')).toHaveValue('alice');
-    expect(screen.getByLabelText('Password')).toBeInTheDocument();
-    expect(screen.getByLabelText('Username')).toHaveAccessibleDescription(`on ${DOMAIN}`);
-  });
-
-  it('disables submit while busy', () => {
-    renderLogin({ busy: true });
-    expect(screen.getByRole('button', { name: 'Signing in…' })).toBeDisabled();
-  });
-
-  it('submits the expanded account address and password, then clears the password', async () => {
-    const user = userEvent.setup();
-    const onSubmit = renderLogin({ defaultUsername: '' });
-    await user.type(screen.getByLabelText('Username'), '  alice  ');
-    await user.type(screen.getByLabelText('Password'), 'secret');
-    await user.click(screen.getByRole('button', { name: 'Sign in' }));
-    expect(onSubmit).toHaveBeenCalledWith('alice@chaterl.localhost', 'secret');
-    expect(screen.getByLabelText('Password')).toHaveValue('');
-  });
-
-  it('submits a full address on the domain unchanged', async () => {
-    const user = userEvent.setup();
-    const onSubmit = renderLogin({ defaultUsername: '' });
-    await user.type(screen.getByLabelText('Username'), 'bob@chaterl.localhost');
-    await user.type(screen.getByLabelText('Password'), 'pw');
-    await user.click(screen.getByRole('button', { name: 'Sign in' }));
-    expect(onSubmit).toHaveBeenCalledWith('bob@chaterl.localhost', 'pw');
-  });
-
-  it('shows an alert and does not submit for a wrong domain', async () => {
-    const user = userEvent.setup();
-    const onSubmit = renderLogin({ defaultUsername: '' });
-    await user.type(screen.getByLabelText('Username'), 'alice@evil.example');
-    await user.type(screen.getByLabelText('Password'), 'pw');
-    await user.click(screen.getByRole('button', { name: 'Sign in' }));
-    expect(onSubmit).not.toHaveBeenCalled();
-    expect(screen.getByRole('alert')).toHaveTextContent(`Use an account on ${DOMAIN}.`);
-  });
-
-  it('shows the error prop in an alert', () => {
-    renderLogin({ error: 'Wrong username or password.' });
-    expect(screen.getByRole('alert')).toHaveTextContent('Wrong username or password.');
-  });
-});
 
 describe('Composer', () => {
   it('is disabled when told to be', () => {
