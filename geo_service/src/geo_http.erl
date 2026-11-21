@@ -17,12 +17,15 @@ child_spec(#{ip := Ip, port := Port}, SessionCfg) ->
     ranch:child_spec(geo_http, ranch_tcp, TransOpts, cowboy_clear, ProtoOpts).
 
 -spec dispatch(geo_config:session_cfg()) -> cowboy_router:dispatch_rules().
-dispatch(SessionCfg) ->
+dispatch(#{jwt_secret := JwtSecret, muc_domain := MucDomain} = SessionCfg) ->
+    %% Least privilege: the locate handler gets the JWT key and the MUC domain, not the admin credentials.
+    LocateCfg = #{jwt_secret => JwtSecret, muc_domain => MucDomain},
     cowboy_router:compile([
         {'_', [
             {"/api/health", geo_http_health, []},
             {"/api/ready", geo_http_ready, []},
             {"/api/session", geo_http_session, SessionCfg},
+            {"/api/locate", geo_http_locate, LocateCfg},
             {'_', geo_http_not_found, []}
         ]}
     ]).

@@ -1,6 +1,9 @@
 -module(geo_log_redact_tests).
 
 -include_lib("eunit/include/eunit.hrl").
+%% eunit.hrl defines a LET macro too; it is not used here.
+-undef(LET).
+-include_lib("proper/include/proper.hrl").
 
 -define(SECRET, <<"s3cret-pw-1x1x">>).
 -define(MASK, <<"[REDACTED]">>).
@@ -64,6 +67,12 @@ non_matching_event_unchanged_test() ->
         {report, #{event => mongo_ready, list => [1, 2, 3], tup => {a, <<"b">>}, s => "text"}}
     ),
     ?assertEqual(Event, geo_log_redact:filter(Event, geo_log_redact:args([?SECRET]))).
+
+%% Pins the documented gap (ADR-018 4a): a bare float that is not next to a coordinate-named key
+%% passes through unchanged. If this ever changes, change it deliberately and update the docs.
+bare_float_in_reason_passes_unchanged_test() ->
+    Event = event({report, #{r => {injected, 57.6491137}}}),
+    ?assertEqual(Event, geo_log_redact:filter(Event, geo_log_redact:args([]))).
 
 empty_secret_list_keeps_other_text_test() ->
     Event = event({report, #{pw => ?SECRET}}),
@@ -145,3 +154,172 @@ short_or_partial_values_untouched_test() ->
 run_pat(Msg) ->
     #{msg := Out} = geo_log_redact:filter(event(Msg), geo_log_redact:args([])),
     Out.
+
+%%% Coordinates (ADR-018) -------------------------------------------------------------------
+
+coord_map_test() ->
+    In =
+        {report, #{
+            body => #{<<"lat">> => 57.6491137, <<"lng">> => 10.4074419, <<"range">> => <<"block">>}
+        }},
+    ?assertEqual(
+        {report, #{body => #{<<"lat">> => ?MASK, <<"lng">> => ?MASK, <<"range">> => <<"block">>}}},
+        run_pat(In)
+    ).
+
+coord_map_key_variants_test() ->
+    In =
+        {report, [
+            #{<<"LAT">> => 1.5},
+            #{latitude => 1.5},
+            #{<<"Longitude">> => 1.5},
+            #{lon => 1.5},
+            #{<<"accuracy">> => 25},
+            #{accuracy => 25}
+        ]},
+    ?assertEqual(
+        {report, [
+            #{<<"LAT">> => ?MASK},
+            #{latitude => ?MASK},
+            #{<<"Longitude">> => ?MASK},
+            #{lon => ?MASK},
+            #{<<"accuracy">> => ?MASK},
+            #{accuracy => ?MASK}
+        ]},
+        run_pat(In)
+    ).
+
+coord_map_other_keys_untouched_test() ->
+    In = {report, #{<<"latency">> => 57, <<"range">> => <<"block">>, <<"x">> => 1.5}},
+    ?assertEqual(In, run_pat(In)).
+
+coord_raw_body_test() ->
+    Body = <<"{\"lat\":57.6491137, \"lng\" : -10.4074419,\"accuracy\":25}">>,
+    Expected = <<"{\"lat\":[REDACTED], \"lng\" : [REDACTED],\"accuracy\":[REDACTED]}">>,
+    ?assertEqual({report, [Expected]}, run_pat({report, [Body]})),
+    ?assertEqual(
+        {report, #{b => binary_to_list(Expected)}},
+        run_pat({report, #{b => binary_to_list(Body)}})
+    ).
+
+coord_raw_body_last_member_and_string_test() ->
+    ?assertEqual(
+        {report, [<<"{\"lng\":[REDACTED]}">>]}, run_pat({report, [<<"{\"lng\":10.4074419}">>]})
+    ),
+    ?assertEqual(
+        {report, [<<"{\"Lat\": [REDACTED],\"range\":\"block\"}">>]},
+        run_pat({report, [<<"{\"Lat\": \"57.6\",\"range\":\"block\"}">>]})
+    ),
+    ?assertEqual(
+        {report, ["\"lat\": [REDACTED]"]}, run_pat({report, ["\"lat\": \"57.6\""]})
+    ).
+
+coord_preformatted_map_test() ->
+    ?assertEqual(
+        {report, ["#{<<\"lat\">> => [REDACTED]}"]},
+        run_pat({report, ["#{<<\"lat\">> => 57.6491137}"]})
+    ),
+    ?assertEqual(
+        {"~s", ["#{<<\"lng\">> => [REDACTED],<<\"range\">> => <<\"block\">>}"]},
+        run_pat({"~s", ["#{<<\"lng\">> => -10.4074419,<<\"range\">> => <<\"block\">>}"]})
+    ).
+
+coord_unrelated_text_untouched_test() ->
+    Event = event({report, [<<"{\"latency\": 57}">>, "\"range\": \"block\"", <<"\"lati\":1">>]}),
+    ?assertEqual(Event, geo_log_redact:filter(Event, geo_log_redact:args([]))).
+
+coord_filter_keeps_secrets_working_test() ->
+    ?assertEqual(
+        {report, #{p => ?MASK, l => #{<<"lat">> => ?MASK}}},
+        run_pat({report, #{p => ?XP, l => #{<<"lat">> => 1.5}}})
+    ),
+    ?assertEqual({report, [?MASK]}, run_session({report, [?ADMIN_PW]})).
+
+%%% Totality (regression: string:lowercase/1 raised on invalid UTF-8 map keys, logger then
+%%% removed the failing filter and later events went out unredacted) ---------------------------
+
+invalid_utf8_key_does_not_raise_test() ->
+    Msg = {report, #{<<255>> => 1, <<"LAT">> => 1.5, <<"La", 200>> => x}},
+    #{msg := {report, Out}} = geo_log_redact:filter(event(Msg), geo_log_redact:args([?SECRET])),
+    ?assertEqual(?MASK, maps:get(<<"LAT">>, Out)),
+    ?assertEqual(1, maps:get(<<255>>, Out)),
+    ?assertEqual(x, maps:get(<<"La", 200>>, Out)).
+
+filter_survives_logging_invalid_utf8_key_test() ->
+    try
+        ok = geo_log_redact:install([?SECRET]),
+        logger:error(#{<<255>> => 1}),
+        ?assertEqual([geo_redact], filter_ids())
+    after
+        geo_log_redact:uninstall()
+    end.
+
+filter_failure_drops_event_test() ->
+    %% A broken args map makes redaction raise: the message is replaced by a fixed, value-free
+    %% placeholder (level kept), not propagated and not passed through unredacted.
+    Out = geo_log_redact:filter(
+        event({report, <<"secret-payload">>}), #{secrets => [], patterns => bad}
+    ),
+    ?assertMatch(
+        #{level := error, msg := {string, <<"[REDACTED: log redaction failed", _/binary>>}}, Out
+    ),
+    ?assertEqual(nomatch, string:find(io_lib:format("~p", [Out]), "secret-payload")).
+
+term_gen() ->
+    term_gen(3).
+
+term_gen(0) ->
+    oneof([
+        resize(20, binary()),
+        resize(20, list(range(0, 255))),
+        integer(),
+        float(),
+        oneof([lat, lng, accuracy, foo, bar]),
+        <<255>>,
+        <<"LAT">>,
+        <<"La", 200>>,
+        "xp1_abcdefghijklmnopqrstuvwxyz012345",
+        <<"{\"lat\":1.5}">>
+    ]);
+term_gen(N) ->
+    Sub = term_gen(N - 1),
+    oneof([
+        term_gen(0),
+        resize(3, list(Sub)),
+        ?LET(L, resize(3, list(Sub)), list_to_tuple(L)),
+        ?LET(
+            L,
+            resize(3, list({oneof([binary(), <<255>>, <<"Lng">>, lat, foo, integer()]), Sub})),
+            maps:from_list(L)
+        ),
+        ?LET({H, T}, {Sub, Sub}, [H | T])
+    ]).
+
+prop_filter_never_raises() ->
+    ?FORALL(
+        {Msg, Meta},
+        {
+            oneof([
+                {report, term_gen()},
+                {string, term_gen()},
+                {"fmt ~p", resize(3, list(term_gen()))},
+                term_gen()
+            ]),
+            term_gen()
+        },
+        begin
+            Event = #{level => error, msg => Msg, meta => #{x => Meta}},
+            %% Redaction itself must never raise: reaching the catch-all (the fixed placeholder)
+            %% counts as a failure here. filter_failure_drops_event_test covers the catch path.
+            case catch geo_log_redact:filter(Event, geo_log_redact:args([?SECRET])) of
+                #{msg := {string, <<"[REDACTED: log redaction failed", _/binary>>}} -> false;
+                #{msg := _} -> true;
+                _ -> false
+            end
+        end
+    ).
+
+filter_never_raises_test_() ->
+    {timeout, 300, fun() ->
+        ?assert(proper:quickcheck(prop_filter_never_raises(), [{numtests, 1000}, {to_file, user}]))
+    end}.

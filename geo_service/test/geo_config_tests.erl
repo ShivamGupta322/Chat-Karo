@@ -477,6 +477,7 @@ session_test_() ->
                     {ok, #{
                         jwt_secret := <<?GOOD_SECRET>>,
                         xmpp_domain := <<"chaterl.localhost">>,
+                        muc_domain := <<"muc.chaterl.localhost">>,
                         admin := #{
                             url := "http://mongooseim:5551/api/graphql",
                             authorization := <<"Basic ", _/binary>>,
@@ -537,6 +538,26 @@ session_test_() ->
                 end
             ]
     ]}.
+
+muc_domain_test_() ->
+    Domain = fun(N) -> lists:duplicate(N, $a) end,
+    [
+        ?_assertEqual(<<"muc.chaterl.localhost">>, geo_config:muc_domain(<<"chaterl.localhost">>)),
+        {foreach, fun save_session_env/0, fun restore_env/1, [
+            fun(_) ->
+                base_session(#{xmpp_domain => Domain(249)}),
+                ?_assertMatch({ok, #{muc_domain := <<"muc.", _:249/binary>>}}, geo_config:session())
+            end,
+            fun(_) ->
+                base_session(#{xmpp_domain => Domain(250)}),
+                Result = geo_config:session(),
+                [
+                    ?_assertEqual({error, {bad_config, xmpp_domain}}, Result),
+                    ?_assertEqual(nomatch, string:find(printed(Result), Domain(20)))
+                ]
+            end
+        ]}
+    ].
 
 save_session_env() ->
     [{K, application:get_env(geo_service, K)} || K <- ?SESSION_KEYS].

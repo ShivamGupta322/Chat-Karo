@@ -17,6 +17,7 @@
     session/0,
     parse_jwt_secret/1,
     parse_xmpp_domain/1,
+    muc_domain/1,
     parse_admin_url/1,
     parse_admin_user/1,
     parse_admin_password/1
@@ -49,6 +50,7 @@
 -type session_cfg() :: #{
     jwt_secret := binary(),
     xmpp_domain := binary(),
+    muc_domain := binary(),
     admin := geo_xmpp_admin:admin()
 }.
 
@@ -314,10 +316,12 @@ session() ->
         {ok, Url} ?= bad(mim_admin_url, parse_admin_url(Get(mim_admin_url))),
         {ok, User} ?= bad(mim_admin_user, parse_admin_user(Get(mim_admin_user))),
         {ok, Password} ?= bad(mim_admin_password, parse_admin_password(Get(mim_admin_password))),
+        true ?= byte_size(Domain) =< 249 orelse {error, {bad_config, xmpp_domain}},
         Basic = base64:encode(<<User/binary, ":", Password/binary>>),
         {ok, #{
             jwt_secret => Secret,
             xmpp_domain => Domain,
+            muc_domain => muc_domain(Domain),
             admin => #{
                 url => Url,
                 authorization => <<"Basic ", Basic/binary>>,
@@ -326,6 +330,11 @@ session() ->
             }
         }}
     end.
+
+%% The MUC service domain: muc.<domain>, as hard-coded in mongooseim.toml.tmpl (host = "muc.@HOST@")
+%% and as the web derives it (ADR-018). Callers keep the domain within 249 bytes.
+-spec muc_domain(XmppDomain :: binary()) -> binary().
+muc_domain(XmppDomain) -> <<"muc.", XmppDomain/binary>>.
 
 %% 32..512 printable ASCII (no `"` or `\`), at least 10 distinct characters, and not a
 %% placeholder starting with change-me (any case). The HMAC key is the raw bytes.

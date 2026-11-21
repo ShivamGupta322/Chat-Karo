@@ -55,7 +55,7 @@ Carry-forward for the next slices (from the 2a/2a+ reviews):
 ## Phase 3 — geo_service
 - [x] rebar3 app, supervision tree, sys.config, Dockerfile (slice 3a, ADR-015)
 - [x] `geohash` module with EUnit + PropEr tests (encode/decode round-trip, neighbours) (slice 3a)
-- [ ] Cowboy: `/api/health`, `/api/session`, `/api/locate` (3a done: `/api/health`; 3c done: `/api/session`)
+- [x] Cowboy: `/api/health`, `/api/session`, `/api/locate` (3a `/api/health`; 3c `/api/session`; 3d `/api/locate`, ADR-018, verified live 2026-11-21)
 - [x] MongoDB pool + `geo_store`; `init-indexes.js` (slice 3b, ADR-016: supervised driver topology, `/api/ready`, rooms upsert)
 - [x] Slice 3b.1: reap leaked Mongo heartbeat connections on a hung server (ADR-016 quirk 10, verified live 2026-11-21)
 - [x] MongooseIM admin API integration: register users (slice 3c, ADR-017, verified live 2026-11-21)

@@ -847,3 +847,106 @@ switched over until 3e.
   the value absent from the output.
 - Cleanup: the three test accounts were removed with `mongooseimctl account removeUser`, their profiles deleted;
   `listUsers` shows only alice and bob (no orphan account from the MongooseIM-down attempt).
+
+---
+
+## ADR-018 — POST /api/locate: auth, validation and crash-safe coordinate handling
+**Status:** Accepted
+**Context:** Slice 3d is the first endpoint that receives raw coordinates. Privacy rules: they must never reach a log,
+a crash report, an error value, a reply or a Mongo document, even when the handler crashes after decoding. Cowboy re-raises
+handler exceptions and `cowboy_stream_h` then logs the exit reason and stack trace; `proc_lib` adds a crash report. A
+`{badmatch, Map}` reason or a `function_clause` top frame would print the decoded map or the raw floats. Also: OTP
+`json:decode/1` errors carry input bytes (`{unexpected_sequence, <<"1.0e400">>}`), and `cow_http_hd:parse_authorization/1`
+crashes with `function_clause` on malformed input, with the header value in the stack arguments.
+**Decision:**
+1. **Auth.** Header only, parsed by our own total function (`geo_http_auth`), never cowlib. No header, an empty value or any
+   non-Bearer scheme is `missing`; a value that is `bearer` (any case) or starts with `bearer` plus one space is a presented
+   credential (only a single SP separates the scheme from the token; `Bearer<TAB>token` is treated as no bearer credential,
+   i.e. missing). The token must be 1..4096 bytes of `[A-Za-z0-9._-]`; an empty token, a second space, a comma (duplicate
+   headers arrive joined as "Bearer a, Bearer b") or any other character is `invalid`. Query-string tokens are not
+   supported: no header plus `?access_token=` is 401 missing; a valid header plus any non-empty query string is 400
+   `invalid_request`. 401 body `{"error":"unauthorized","message":"A valid bearer token is required."}`, with
+   `www-authenticate: Bearer realm="chaterl-api"` (missing) or `..., error="invalid_token"` (malformed, bad signature,
+   `alg:none`, wrong secret, expired; expired and invalid look the same). Order: 405, 401, query-string 400, then 415/413/400
+   from the body; the body is never read for a 401. The JWT alone is enough (no profile lookup: nothing is revocable yet; a
+   token stays valid at most 1 h after its profile is deleted, accepted).
+2. **Request.** `lat` and `lng` required, `range` and `accuracy` optional, any other key (including `Lat`, `latitude`) is 400
+   `invalid_request`. `lat`/`lng`/`accuracy` must be numbers (strings, booleans, `null`, arrays, objects are rejected);
+   `1e400` fails decoding (400 `invalid_json`). `range` is exactly `block` (default), `neighbourhood` or `area`
+   (`geo_cell:parse_range/1`; the US spelling is rejected, note for 3e). `accuracy` is validated (0..1000000 m) and then
+   ignored: never stored or logged. Check order: key set and types, range, accuracy, then bounds; a body that is both
+   malformed and out of range is `invalid_request`. Bounds lat [-90, 90], lng [-180, 180] inclusive give `invalid_location`
+   (one code for both). lng 180 and -180 give different cells (accepted, documented). Body cap 256 bytes. Duplicate JSON keys
+   are first-wins in OTP `json` (`{"a":1,"a":2}` gives `a => 1`): not a privacy issue.
+3. **Response.** 200 with ordered keys `cell, precision, range, room_jid`, byte-identical for a created and an updated room
+   (no activity oracle). The MUC domain is derived `muc.<XMPP_DOMAIN>` in `geo_config:session/0`, mirroring
+   `host = "muc.@HOST@"` in the MongooseIM template (fails `{bad_config, xmpp_domain}` above 249 bytes so that the derived
+   name stays within 253). No new env var; the unused `MUC_SUBDOMAIN` was removed from `.env.example`. The web keeps
+   `VITE_XMPP_MUC_DOMAIN`; 3e validates `room_jid` against it. Later additive keys are possible, so the 3e parser tolerates
+   extra keys.
+4. **Privacy, two layers; the first is the guarantee.**
+   - (b) **Guarded handler.** Everything after body decoding (`geo_locate:cell_for/1`, `geo_store:touch_room/1`, building
+     the reply) runs in ONE `try ... catch Class:Reason:Stack`. A crash replies 500 `internal_error` and logs exactly one
+     `#{event => locate_crashed, class, reason, where}` built by the pure `geo_crash:summary/3`: the reason is the atom
+     itself or the leading atom of a tagged tuple (else `term`); `where` is the top 5 frames as `{M, F, Arity, Line}`, with
+     argument lists reduced to arities and `error_info` dropped. So no `cowboy_stream_h` error and no `proc_lib` report is
+     produced for this path. This is a deliberate, narrow exception to let-it-crash: a short-lived request process with
+     nothing to restart whose reason and stack are exactly what can carry the user's position. The read and auth phases stay
+     outside the try, so Cowboy's `{request_error, ...}` exits still produce its 400/408/413 (those carry no body). There is
+     no `terminate/3` (Cowboy would pass it `{crash, Class, Reason}`). Calls into `geo_locate` and `geo_store` are fully
+     qualified (the CT suite fault-injects them), and the reply is the last expression in the try. `geo_cell:from_point/3`
+     and `geohash:encode/3` are total; a PropEr property (1000 cases) proves `cell_for/1` total. An unexpected return from the
+     store (anything but `{ok, created | updated}`) is a case_clause that lands in the catch.
+   - (a) **Logger backstop in `geo_log_redact`.** A map value under a key named lat, lng, lon, latitude, longitude or accuracy
+     (binary in any case, or atom) becomes `[REDACTED]`, and two key-preserving text patterns mask the values in raw JSON
+     bytes and in pre-formatted `~p` map text (`<<"lat">> => 1.5`), over binaries and char lists. **What this does not cover:** a coordinate that is not next to a coordinate-named key, i.e. bare floats anywhere in a term (stack arguments `[57.6, 10.4, block]`, exception reasons `{badarg, 57.6}`, tuples, lists); JSON that was already escaped into a formatted string (`<<"{\"lat\":57.6}">>`); and a body split across TCP packets. Hence (b) is the
+     guarantee and (a) only a net. The filter fails closed: if redaction itself raises, that event's message is replaced
+     by a fixed, value-free placeholder (`[REDACTED: log redaction failed, event dropped]`, level and time kept) instead
+     of letting logger remove the filter; the placeholder keeps such a bug visible. Only `msg` is redacted, never `meta`
+     (the default formatter template prints no arbitrary meta; a template that did would not be covered).
+   - Error messages are constants, never echoing values or key names; no logger call receives the body, the request, the
+     config or a coordinate.
+5. **Mongo write.** `geo_store:touch_room(Cell)` on every successful locate. `{error, mongo_unavailable}` is 503
+   `service_unavailable` with `retry-after: 5` ("return the room anyway" is rejected: from 3f geo_service owns room creation).
+   `{error, write_failed}` is 500 plus one `#{event => locate_store_failed}` at warning (no cell, no sub). No MongooseIM room
+   creation yet (3f). Rooms expire 7 days after `lastActiveAt` (TTL). The rooms document is unchanged: exactly `_id,
+   precision, geohash, center` (the cell centre, `[lng, lat]`), `createdAt`, `lastActiveAt`; no index changes.
+6. **Status codes.** 200; 400 `invalid_json` / `invalid_request` / `invalid_location`; 401 + `www-authenticate`; 405 + `allow:
+   POST` (before auth); 413; 415; 503 + `retry-after: 5`; 500. All with `cache-control: no-store`.
+7. **Logging.** Nothing per request on success, at any level. Auth failures and 4xx are not logged. Only `locate_crashed`
+   (error) and `locate_store_failed` (warning), neither with a cell or a sub.
+8. `/api/session/renew` stays in 3e.
+9. **Test dependency.** meck 1.2.0 (Apache-2.0), test profile only, for fault injection without production test hooks; it
+   never ships.
+**Consequences:** abuse control is deferred: no rate limit and no impossible-jump check until Phase 4 (`geo_rate`), so any
+valid token can locate any cell repeatedly; accepted while the service is bound to localhost. No profile lookup, so a
+deleted profile's token works until it expires. The coordinate-key redaction is a net with known gaps (above); the try/catch
+is what keeps coordinates out of crash output. One handler deliberately catches all exceptions after decoding.
+
+### Live evidence
+**2026-11-21, Docker Desktop on Windows, rebuilt image** (token from a fresh `/api/session`, kept in a file and never
+printed; request bodies sent from files):
+- All four services healthy, `/api/ready` 200.
+- `POST /api/locate {"lat":57.6491137,"lng":10.4074419}` → 200
+  `{"cell":"u4pruyd","precision":7,"range":"block","room_jid":"g7_u4pruyd@muc.chaterl.localhost"}` with
+  `cache-control: no-store`; `"range":"area"` → 200 `{"cell":"u4pru","precision":5,"range":"area","room_jid":"g5_u4pru@muc.chaterl.localhost"}`.
+- Mongo `rooms` `g7_u4pruyd`: exactly `_id, center, createdAt, geohash, lastActiveAt, precision`; precision 7;
+  `center.coordinates` = `[10.407485961914062, 57.64869689941406]` (the cell centre, not the request point);
+  `createdAt == lastActiveAt` on insert. A second point in the same cell → an identical 200 body; only `lastActiveAt`
+  advanced. Indexes unchanged: `_id_, center_2dsphere, lastActiveAt_ttl`.
+- No header → 401 `www-authenticate: Bearer realm="chaterl-api"`; a tampered token and an alg-none token → 401
+  `Bearer realm="chaterl-api", error="invalid_token"`; the token in the query string with no header → 401 realm only;
+  GET → 405 `allow: POST`; lat 90.0000173 → 400 `invalid_location` (the value not echoed); `text/plain` → 415.
+- Vite proxy `POST http://localhost:5173/api/locate` → 200 with the identical body; no `access-control-*` headers.
+- Logs (scanned in a script, values never printed): 0 occurrences of `57.6491137`, `10.4074419`, `57.6485531`,
+  `10.4070917`, `90.0000173` and the token; 0 `locate_*` lines after the successful and 4xx requests.
+- `docker compose stop mongo` → locate 503 `service_unavailable` with `retry-after: 5` in 3 s; after `start mongo` → 200;
+  geo_service RestartCount 0; still 0 coordinate occurrences in the logs afterwards.
+- Cleanup: the test account removed with `mongooseimctl account removeUser`, its profile and the two test rooms deleted;
+  `listUsers` shows only alice and bob.
+- Rounds 2–3 (rebuilt image): a valid token and a `bEaReR` scheme → 200; the header bytes that crashed the round-1
+  parser (`\xff\xfe\xc3(\x80\x81` as the scheme) → 401 realm only, a token with invalid bytes → 401 `invalid_token`;
+  `content-type: application/json; charset="\xff"` → 415 `unsupported_media_type` on `/api/session` (it crashed with 500
+  before); 0 crash reports. In the running node (`bin/geo_service eval`), `logger:error(#{<<255>> => 1, <<"LAT">> => 1.5})`
+  printed `LAT` as `[REDACTED]` and `geo_redact` stayed among the primary filters (before round 3 logger removed it and every
+  later line went out unredacted); a following line with an `xp1_` test string came out `[REDACTED]`.

@@ -51,7 +51,7 @@ In production a reverse proxy (Caddy or nginx) terminates TLS and routes `/api` 
 ### Locate & join
 1. Client gets `{lat, lng, accuracy}` from `navigator.geolocation.watchPosition`.
 2. Client `POST /api/locate {lat, lng, accuracy, range}` (JWT auth).
-3. geo_service:
+3. geo_service (Phase 3d implements validation, the cell, the rooms upsert and the reply; rate limit, jump check, `geo_room` and places are not built yet):
    - validates input (lat ∈ [-90,90], lng ∈ [-180,180], accuracy sane);
    - checks rate limit + impossible-jump against the user's *last cell centre and timestamp* (ETS — no raw coords kept);
    - encodes geohash at the range's precision; computes the room JID;
@@ -117,6 +117,15 @@ admin API client. New environment keys, validated by `geo_config:session/0` (key
 the admin API: a MongooseIM outage only makes session requests answer 503. The request runs in the Cowboy request
 process (no gen_server). Rate limiting is deferred (Phase 4 and 6 in the roadmap).
 
+**Status (Phase 3d):** `POST /api/locate` is live (ADR-018). Auth is the JWT alone (header `Authorization: Bearer`, parsed by
+`geo_http_auth`; no profile lookup, no query-string tokens). There is no rate limit, no impossible-jump check and no
+`geo_room` process yet (Phase 4); `accuracy` is validated and ignored; the MUC domain is derived as `muc.<XMPP_DOMAIN>`
+(`geo_config:muc_domain/1`, no new env var). The handler runs everything after body decoding inside one try/catch that
+replies 500 and logs only `geo_crash:summary/3` (class, atom reason, frame arities), so a crash cannot put the position into
+Cowboy's error line or a crash report (a deliberate, narrow exception to let-it-crash). `geo_log_redact` adds a backstop that
+masks `lat`/`lng`/`lon`/`latitude`/`longitude`/`accuracy` values in maps and in JSON text; it cannot catch bare floats anywhere
+(e.g. stack arguments or exception reasons), so the try/catch is the guarantee. The rooms document is unchanged (six keys, cell centre only).
+
 `geohash` API (pure; no logging, no processes; matches `web/src/geo/geohash.ts`):
 
 | Function | Returns |
@@ -139,14 +148,18 @@ process (no gen_server). Rate limiting is deferred (Phase 4 and 6 in the roadmap
 | `geo_mongo` | Driver topology child spec, `ready/0`, `ping/0`, `update_one/4`, `find_one/3`, write-result classification |
 | `geo_mongo_probe` | gen_server owning the `geo_mongo_status` ETS table (up/down), probes every 5 s, reaps abandoned heartbeat connections |
 | `geo_mongo_reaper` | Pure: finds the driver monitor's abandoned heartbeat `mc_worker` processes and picks those older than 30 s (ADR-016 quirk 10) |
-| `geo_log_redact` | Logger primary filter that redacts the configured secrets plus run-time patterns (xp1_ passwords, JWTs) |
+| `geo_log_redact` | Logger primary filter that redacts the configured secrets plus run-time patterns (xp1_ passwords, JWTs) and, as a backstop, coordinate-named map values and JSON text |
 | `geo_rate` | Token-bucket rate limit + impossible-jump check (ETS) |
 | `geo_room` | Per-cell gen_server: activity tracking, idle shutdown, slow-mode settings |
 | `geo_room_sup` | Starts/stops `geo_room` children on demand |
 | `geo_config` | The only reader of app env; validates `http_ip` / `http_port`, the `mongo_*` keys and `session/0` (JWT secret, XMPP domain, admin API) |
 | `geo_http` | Embedded ranch listener and routes |
 | `geo_http_reply` | JSON replies and security headers |
-| `geo_http_*` | Cowboy handlers: `health`, `ready`, `not_found`, `session`, and later `locate`, `places`, `report` |
+| `geo_http_*` | Cowboy handlers: `health`, `ready`, `not_found`, `session`, `locate`, and later `places`, `report` |
+| `geo_http_locate` | `POST /api/locate`: auth, body read, then one guarded section (cell, rooms upsert, reply); logs only `locate_crashed` / `locate_store_failed` |
+| `geo_http_auth` | Pure Bearer-header parsing and token check (never cowlib, never logs) |
+| `geo_locate` | Pure: validates the locate body (keys, types, range, accuracy, bounds) and builds the response; errors are bare atoms |
+| `geo_crash` | Pure: reduces a caught exception to class, atom reason and `{M,F,Arity,Line}` frames, never argument values |
 | `geo_http_json` | Reads a small JSON-object body: content type, size cap, decoding |
 | `geo_auth` | Pure HS256 JWT issue/verify (HS256 only, constant-time signature check before the payload is parsed) |
 | `geo_nickname` | Pure nickname rules and the reserved list |
@@ -159,7 +172,7 @@ process (no gen_server). Rate limiting is deferred (Phase 4 and 6 in the roadmap
 | Method | Path | Body → Response |
 |---|---|---|
 | POST | `/api/session` | `{nickname}` → `201 {nickname, jid, xmpp_password, token, token_type:"Bearer", expires_in:3600}`; errors `400 invalid_json / invalid_request / invalid_nickname`, `405`, `409 nickname_taken` (also for reserved names), `413`, `415`, `503` (+ `retry-after: 5`), `500`. Body cap 1024 bytes. Never logged |
-| POST | `/api/locate` | `{lat, lng, accuracy, range}` → `{cell, room_jid, places}` |
+| POST | `/api/locate` | `Authorization: Bearer`, `{lat, lng, range?, accuracy?}` → `200 {cell, precision, range, room_jid}` (same bytes for a new and an existing room); errors `401` (+ `www-authenticate`), `400 invalid_json / invalid_request / invalid_location`, `405`, `413`, `415`, `503` (+ `retry-after: 5`), `500`. Body cap 256 bytes. Never logged. `places` / neighbours come later |
 | GET | `/api/rooms/nearby?cell=…` | → active rooms in neighbouring cells |
 | GET | `/api/places?cell=…` | → named places in/near cell |
 | POST | `/api/report` | `{room_jid, message_id, reason}` → `204` |

@@ -55,7 +55,8 @@ check_content_type(Req) ->
 check_params([]) ->
     ok;
 check_params([{<<"charset">>, Charset}]) ->
-    case string:lowercase(Charset) of
+    %% The charset is attacker-controlled bytes (cowlib accepts a quoted \xff): never string:lowercase.
+    case geo_ascii:lower(Charset) of
         <<"utf-8">> -> ok;
         _ -> error
     end;

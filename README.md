@@ -63,6 +63,18 @@ once plus a 1 h API token; `201` with `nickname`, `jid`, `xmpp_password`, `token
 curl.exe -X POST http://127.0.0.1:8080/api/session -H "content-type: application/json" -d "{\"nickname\":\"Zed\"}"
 ```
 
+Locate: turn a position into a room (the coordinates become a geohash cell and are discarded, never logged or stored).
+Put the body in a file (`body.json`: `{"lat":57.6491137,"lng":10.4074419}`; optional `"range"`: `block` (default),
+`neighbourhood` or `area`, optional `"accuracy"` in metres, ignored), and use the token from `/api/session`:
+
+```bash
+curl.exe -X POST http://127.0.0.1:8080/api/locate -H "authorization: Bearer <token>" -H "content-type: application/json" --data-binary @body.json
+# 200 {"cell":"u4pruyd","precision":7,"range":"block","room_jid":"g7_u4pruyd@muc.chaterl.localhost"}
+```
+
+Errors: `401` (missing or invalid token, with `www-authenticate`), `400 invalid_json / invalid_request / invalid_location`,
+`405`, `413` (body over 256 bytes), `415`, `503` (+ `retry-after: 5`), `500`. The token goes in the header only, never in the query string.
+
 While `npm run dev` is running, the same API is reachable same-origin at `http://localhost:5173/api/...` (Vite proxies
 `/api/` to geo_service on `127.0.0.1:GEO_HTTP_PORT`). Never paste the response into issues or logs: it holds a password.
 
