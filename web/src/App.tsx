@@ -8,11 +8,10 @@ import { useXmppStoreBinding } from './state/useXmppStoreBinding';
 import { useXmppClient } from './xmpp';
 
 export interface AppProps {
-  mucDomain: string;
   mapTileUrl: string | null;
 }
 
-export function App({ mucDomain, mapTileUrl }: AppProps): React.JSX.Element {
+export function App({ mapTileUrl }: AppProps): React.JSX.Element {
   useXmppStoreBinding(useXmppClient());
   const identity = useIdentityController();
   const id = useIdentityStore();
@@ -48,7 +47,6 @@ export function App({ mucDomain, mapTileUrl }: AppProps): React.JSX.Element {
     case 'chat':
       return (
         <Chat
-          mucDomain={mucDomain}
           mapTileUrl={mapTileUrl}
           nickname={view.nickname}
           onSignOut={identity.signOut}

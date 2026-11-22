@@ -1,4 +1,4 @@
-import { encodeGeohash, type GeohashError } from './geohash';
+import { decodeGeohashBounds, encodeGeohash, type GeohashError } from './geohash';
 
 /** Precision 7 = "Block" (~150 m cells), ADR-001. */
 export type CellPrecision = 7;
@@ -17,9 +17,18 @@ export function cellFor(lat: number, lng: number, precision: CellPrecision): Cel
   return { ok: true, cell: { precision, geohash: res.geohash } };
 }
 
-// TEMPORARY (Phase 3): client-side room assignment. Replaced by geo_service /api/locate; delete
-// roomJidForCell and its single call site in pages/Chat.tsx when the client switches. (cellFor stays.)
-/** 'g7_u4pruyd@muc.chaterl.localhost' */
-export function roomJidForCell(cell: Cell, mucDomain: string): string {
-  return `g${String(cell.precision)}_${cell.geohash}@${mucDomain}`;
+/** A raw point. It is turned into a Cell (or a request body) at once and never kept. */
+export interface GeoPoint {
+  readonly lat: number;
+  readonly lng: number;
+}
+
+export type CellCentreResult = { ok: true; point: GeoPoint } | { ok: false; error: 'invalid-geohash' };
+
+/** The midpoint of the cell: the only location that ever leaves geo/ (via api/locate.ts, ADR-019 D3). */
+export function cellCentre(cell: Cell): CellCentreResult {
+  const res = decodeGeohashBounds(cell.geohash);
+  if (!res.ok) return res;
+  const { south, north, west, east } = res.bounds;
+  return { ok: true, point: { lat: (south + north) / 2, lng: (west + east) / 2 } };
 }

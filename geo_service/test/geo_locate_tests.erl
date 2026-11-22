@@ -269,8 +269,8 @@ body_text(Cell, Range) ->
 
 %%% Drift guard ----------------------------------------------------------------------------
 %% The room id format must match what the web accepts: ROOM_LOCALPART in web/src/xmpp/jid.ts,
-%% the muc.<domain> default in web/src/config.ts and (until 3e deletes it) roomJidForCell in
-%% web/src/geo/cell.ts.
+%% the muc.<domain> default in web/src/config.ts. The client no longer builds room JIDs: it checks
+%% the server's room_jid by equality (web/src/api/locate.ts).
 
 web_file(Parts) ->
     filename:join([filename:dirname(?FILE), "..", "..", "web", "src" | Parts]).
@@ -291,8 +291,7 @@ drift_guard_test_() ->
             [?_assertMatch({match, _}, re:run(Id, Re)) || Id <- Ids] ++
                 [
                     ?_assertEqual(match, re:run(<<"g7_u4pruyd">>, Re, [{capture, none}])),
-                    config_guard(),
-                    cell_guard()
+                    config_guard()
                 ];
         {error, _} ->
             ?debugMsg("drift guard skipped: web/src/xmpp/jid.ts not found"),
@@ -305,27 +304,5 @@ config_guard() ->
             ?_assertNotEqual(nomatch, binary:match(Config, <<"`muc.${domain}`">>));
         {error, _} ->
             ?debugMsg("drift guard (config.ts) skipped"),
-            ?_assert(true)
-    end.
-
-%% Skipped (vacuous) once roomJidForCell is deleted in 3e.
-cell_guard() ->
-    case file:read_file(web_file(["geo", "cell.ts"])) of
-        {ok, Cell} ->
-            case binary:match(Cell, <<"roomJidForCell">>) of
-                nomatch ->
-                    ?debugMsg("drift guard (cell.ts) skipped: roomJidForCell is gone"),
-                    ?_assert(true);
-                _ ->
-                    ?_assertNotEqual(
-                        nomatch,
-                        binary:match(
-                            Cell,
-                            <<"`g${String(cell.precision)}_${cell.geohash}@${mucDomain}`">>
-                        )
-                    )
-            end;
-        {error, _} ->
-            ?debugMsg("drift guard (cell.ts) skipped: file not found"),
             ?_assert(true)
     end.

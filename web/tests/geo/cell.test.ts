@@ -1,9 +1,6 @@
 import { describe, expect, it } from 'vitest';
-import { cellFor, roomJidForCell } from '../../src/geo/cell';
-import { isValidRoomJid } from '../../src/xmpp';
+import { cellCentre, cellFor } from '../../src/geo/cell';
 import { VECTORS } from './vectors';
-
-const MUC = 'muc.chaterl.localhost';
 
 describe('cellFor', () => {
   it.each(VECTORS)('(%f, %f) -> %s', (lat, lng, expected) => {
@@ -26,16 +23,41 @@ describe('cellFor', () => {
   });
 });
 
-describe('roomJidForCell', () => {
-  it('builds g7_<geohash>@<muc domain>', () => {
-    expect(roomJidForCell({ precision: 7, geohash: 'u4pruyd' }, MUC)).toBe(
-      'g7_u4pruyd@muc.chaterl.localhost',
-    );
+describe('cellCentre', () => {
+  // Hard-coded oracle values (the same centre geo_service stores in rooms.center), never derived from cellCentre.
+  it.each([
+    // eslint-disable-next-line no-loss-of-precision
+    ['u4pruyd', 57.64869689941406, 10.407485961914062],
+    ['u4pruye', 57.64869689941406, 10.408859252929688],
+    ['gcpvj0d', 51.50733947753906, -0.1284027099609375],
+  ])('%s -> exactly (%f, %f)', (geohash, lat, lng) => {
+    expect(cellCentre({ precision: 7, geohash })).toEqual({ ok: true, point: { lat, lng } });
   });
 
-  it.each(VECTORS)('is a valid room address for (%f, %f)', (lat, lng) => {
-    const res = cellFor(lat, lng, 7);
-    expect(res.ok).toBe(true);
-    if (res.ok) expect(isValidRoomJid(roomJidForCell(res.cell, MUC), MUC)).toBe(true);
+  it.each(VECTORS)('the centre of the cell of (%f, %f) is in the same cell', (lat, lng, expected) => {
+    const centre = cellCentre({ precision: 7, geohash: expected });
+    expect(centre.ok).toBe(true);
+    if (centre.ok) {
+      expect(cellFor(centre.point.lat, centre.point.lng, 7)).toEqual({
+        ok: true,
+        cell: { precision: 7, geohash: expected },
+      });
+    }
+  });
+
+  it('is not the raw point it was derived from', () => {
+    const centre = cellCentre({ precision: 7, geohash: 'u4pruyd' });
+    expect(centre.ok).toBe(true);
+    if (centre.ok) {
+      expect(centre.point.lat).not.toBe(57.64911);
+      expect(centre.point.lng).not.toBe(10.40744);
+    }
+  });
+
+  it('rejects an invalid geohash', () => {
+    expect(cellCentre({ precision: 7, geohash: 'u4prA' })).toEqual({
+      ok: false,
+      error: 'invalid-geohash',
+    });
   });
 });

@@ -57,12 +57,12 @@ In production a reverse proxy (Caddy or nginx) terminates TLS and routes `/api` 
 5. A token manager (`api/tokenManager.ts`) renews at 80% of `expires_in`, single-flights renews and backs off
    5, 10, 20, 30 s (or the server's `retry-after`, whichever is longer), never while offline and at once on the
    window `online` event. A renew failure never disconnects XMPP: a 401 only shows a notice with "Start over".
-   `/api/locate` (3e-3) will call it through `withToken`.
+   `/api/locate` (3e-3) calls it through `withToken`.
 6. The MUC nick is the profile nickname, not the localpart (`u<32 hex>` is 33 characters, over the 32-character nick limit).
 
 ### Locate & join
-1. Client gets `{lat, lng, accuracy}` from `navigator.geolocation.watchPosition`.
-2. Client `POST /api/locate {lat, lng, accuracy, range}` (JWT auth).
+1. Client gets a fix from `navigator.geolocation.watchPosition` and turns it into a precision-7 cell with `cellFor`; the raw fix is discarded inside `geo/`.
+2. On a committed cell change (the ADR-013 triggers, plus a retry after an error) `geo/roomAssigner` posts `{lat, lng}` = **the centre of that cell** (never the raw fix) through `api/locate.ts` and `withToken` (JWT auth), and aborts any earlier request (ADR-019 D3).
 3. geo_service (Phase 3d implements validation, the cell, the rooms upsert and the reply; rate limit, jump check, `geo_room` and places are not built yet):
    - validates input (lat ∈ [-90,90], lng ∈ [-180,180], accuracy sane);
    - checks rate limit + impossible-jump against the user's *last cell centre and timestamp* (ETS — no raw coords kept);
@@ -70,7 +70,7 @@ In production a reverse proxy (Caddy or nginx) terminates TLS and routes `/api` 
    - ensures a `geo_room` process exists for the cell (starts it on demand);
    - upserts the `rooms` document; returns `{cell, room_jid, neighbours?, places_nearby}`.
    - **discards lat/lng.**
-4. Client joins the MUC room via presence to `room_jid/nick`, leaves the old one if the cell changed.
+4. The client validates the answer (exact equality with `g<precision>_<cell>@<muc domain>`) and joins `room_jid/nick` through `useAreaRoom`; it leaves the old room only after the new assignment has arrived. On failure or location loss it leaves and shows why (retry button, automatic backoff).
 
 ### Moving
 Client-side `geo/` applies hysteresis: it only calls `/api/locate` when the device is ≥ a margin inside
@@ -87,7 +87,7 @@ limited to 24 h by query and periodic purge (see ADR-004).
 e.g.  g7_gcpvj0e@muc.chaterl.localhost
 ```
 
-Room JIDs are deterministic from the cell so any node can compute them; no lookup needed to join.
+Room JIDs are deterministic from the cell. The client never builds them: geo_service answers with `room_jid` and the client only checks it for exact equality with that format.
 
 ## geo_service (Erlang/OTP)
 
@@ -243,7 +243,8 @@ web/src/
 ├── xmpp/        client.ts (connect, reconnect w/ backoff), muc.ts (join/leave/send), types.ts,
 │                reconnect.ts (backoff + retry scheduler), lifecycle.ts (online/visible wake), socketClose.ts (close diagnostics),
 │                mam.ts (MAM history query builder + result/fin parsers, pure)
-├── geo/         geohash.ts (own encoder, no ngeohash), cell.ts (cellFor; roomJidForCell is TEMPORARY until Phase 3),
+├── geo/         geohash.ts (own encoder, no ngeohash), cell.ts (cellFor, cellCentre),
+│                roomAssigner.ts (asks /api/locate for the room of a cell; framework-free), RoomAssignment.tsx (provider + useRoomAssignment),
 │                useLocation.ts (watchPosition + Permissions API, cell-only state), useArea.ts (device cell + dev spot),
 │                DevLocationPicker.tsx (dev only), DevMap.tsx (dev only, lazy, the only Leaflet importer; shades the whole
 │                cell, never the clicked point), DevMapBoundary.tsx (error boundary), decodeGeohashBounds/wrapLng in
@@ -253,17 +254,18 @@ web/src/
 │                http.ts (createHttp: the only fetch caller, timeout/abort, never throws), session.ts (create / renew,
 │                response validation), tokenManager.ts (memory-only JWT, renew at 80%, getToken / withToken),
 │                deviceCredential.ts (the only browser-storage user), nickname.ts, identityRules.ts (shared shape rules),
+│                locate.ts (POST /api/locate; imported only by geo/ and main.tsx, lint-enforced),
 │                devIdentitySlot.ts (dev only: ?identity=<slot>), index.ts (public entry)
 ├── state/       Zustand stores: session, room, identity (nickname, intent, token status; never a password or token),
 │                messages, presence; identityController.ts (device identity lifecycle, outside React), IdentityProvider.tsx,
-│                useAreaRoom.ts (keeps the client in the one desired room)
+│                useAreaRoom.ts (keeps the client in the one desired room); state/ cannot import geo/ (lint-enforced)
 ├── components/  MessageList (+ scrollAnchor.ts: keeps scroll position when earlier messages load above),
 │                Composer, OccupantList, AreaPanel, RangeSlider, RoomMap, ReportDialog
 └── pages/       Welcome (new / returning / connecting), Chat
 ```
 
-State flow: `useLocation` → `/api/locate` → room store updates `currentRoomJid` → xmpp `muc` effect
-leaves old / joins new → incoming stanzas dispatched to message & presence stores.
+State flow: `useLocation` → `useArea` (committed Cell) → `roomAssigner` → `POST /api/locate` (cell centre) → validated `room_jid` →
+`useAreaRoom` leave/join → stanzas → stores. WebSocket and EventSource exist only in `xmpp/strophe/` (lint-enforced).
 
 ## Security
 

@@ -160,4 +160,16 @@ describe('area and dev-location text', () => {
     expect(AREA_TEXT.areaLabel('u4pruyd')).toBe('Area u4pruyd');
     expect(AREA_TEXT.joining('Area u4pruyd')).toBe('Joining Area u4pruyd…');
   });
+
+  it('has the locate copy', () => {
+    expect(AREA_TEXT.assigning('Area u4pruyd')).toBe('Finding the chat for Area u4pruyd…');
+    expect(AREA_TEXT.retryAssign).toBe('Find my area chat');
+    const texts = [
+      AREA_TEXT.locateUnavailable,
+      AREA_TEXT.locateOffline,
+      AREA_TEXT.locateIdentityInvalid,
+      AREA_TEXT.locateBadResponse,
+    ];
+    expect(new Set(texts).size).toBe(texts.length);
+  });
 });

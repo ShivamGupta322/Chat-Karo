@@ -2,6 +2,7 @@ import { act, render, screen } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { ConfigError } from '../../src/components/ConfigError';
 import { LogoMark } from '../../src/components/Logo';
+import { RoomAssignerProvider, type RoomAssigner, type RoomAssignment } from '../../src/geo';
 import { Chat } from '../../src/pages/Chat';
 import { initialRoomState, useRoomStore } from '../../src/state/room';
 import { useSessionStore } from '../../src/state/session';
@@ -56,14 +57,24 @@ describe('Chat page room status', () => {
     const geo = createFakeGeolocation();
     installGeo({ geolocation: geo, permissions: createFakePermissions('granted'), secure: true });
     const client = createXmppClient(createFakeTransport(), { mucDomain: 'muc.chaterl.localhost' });
+    // The assigner is faked: the page only reads the assignment it is given.
+    const assigned: RoomAssignment = {
+      status: 'assigned',
+      cell: { precision: 7, geohash: 'u4pruyd' },
+      room: { jid: CELL_ROOM, cell: 'u4pruyd' },
+    };
+    const assigner: RoomAssigner = {
+      assign: () => undefined,
+      retry: () => undefined,
+      getState: () => assigned,
+      subscribe: () => () => undefined,
+      dispose: () => undefined,
+    };
     render(
       <XmppProvider client={client}>
-        <Chat
-          mucDomain="muc.chaterl.localhost"
-          mapTileUrl={null}
-          nickname="alice"
-          onSignOut={() => undefined}
-        />
+        <RoomAssignerProvider assigner={assigner}>
+          <Chat mapTileUrl={null} nickname="alice" onSignOut={() => undefined} />
+        </RoomAssignerProvider>
       </XmppProvider>,
     );
     await act(async () => {

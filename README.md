@@ -11,8 +11,8 @@ Built with **Erlang/OTP**, **MongooseIM (XMPP)**, **MongoDB** and a **React + Ty
 
 ## How it works
 
-1. The browser gets your position from the Geolocation API.
-2. The Erlang **geo_service** converts it to a geohash cell and discards the coordinates.
+1. The browser gets your position from the Geolocation API and snaps it to your ~150 m area.
+2. It sends only that area's centre to the Erlang **geo_service**, which picks the room and discards the coordinates.
 3. You join the XMPP multi-user chat room for that cell (and optionally its neighbours).
 4. Move into a new cell and the client switches rooms automatically.
 
@@ -102,7 +102,7 @@ password), stores it on this device only, and puts you in the chat for the area 
 automatically; "Sign out" keeps the name ("Continue as ..."), and "Start over with a new name" asks first and forgets it.
 The `alice` and `bob` users from the dev seed are only for the smoke page above.
 The browser asks for permission to use your location; the chat room is named after your area code (for example
-`Area u4pruyd`). Your exact location is turned into that code inside the browser and is never sent or stored.
+`Area u4pruyd`). Only the centre of your area is sent to geo_service, which picks the room; your exact position never leaves the browser and nothing is stored.
 Optional, dev only: set `VITE_MAP_TILE_URL` in `.env` (the line in `.env.example` uses OpenStreetMap tiles; copy it if
 your `.env` predates this) to get a map in the "Test locations (dev)" panel. Leave it empty for no map; the test spots
 and fields still work. The map is never part of a production build. Each tile request tells the tile server which area
@@ -125,9 +125,7 @@ MSYS_NO_PATHCONV=1 docker compose exec mongooseim mongooseimctl account removeUs
 MSYS_NO_PATHCONV=1 docker compose exec -T mongo mongosh --quiet chaterl --eval 'db.profiles.deleteMany({_id:{$in:["<localpart>"]}})'
 ```
 
-### Phase 2 demo: two people, one area, then moving
-
-Room assignment is client-side and temporary here (ADR-013); the server takes over in Phase 3.
+### Demo: server-assigned rooms (two people, one area, then moving)
 
 1. `cp .env.example .env` and replace every `change-me`, then `docker compose up -d` and wait until
    `docker compose ps` shows all four healthy (geo_service is built from `geo_service/` on first start).
@@ -141,6 +139,7 @@ Room assignment is client-side and temporary here (ADR-013); the server takes ov
    in an empty chat for `Area u4pruye`, with its own history.
 7. Choose "Test spot A" again in Bob's window: the first room's recent history comes back from the archive.
    "Use my real location" returns to the device location.
+8. See the room geo_service made: `MSYS_NO_PATHCONV=1 docker compose exec -T mongo mongosh --quiet chaterl --eval 'db.rooms.find({_id:"g7_u4pruyd"}).toArray()'`
 
 The test-location panel only exists in the dev server, not in a production build.
 

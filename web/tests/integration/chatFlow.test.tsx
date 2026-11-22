@@ -8,10 +8,13 @@ import {
   createTokenManager,
   type DeviceCredential,
   type HttpResponseLike,
+  type OnlineSource,
   type TimerHandle,
   type Timers,
 } from '../../src/api';
+import { createLocateApi } from '../../src/api/locate';
 import { App } from '../../src/App';
+import { RoomAssignerProvider, createRoomAssigner } from '../../src/geo';
 import { initialIdentityState, useIdentityStore } from '../../src/state/identity';
 import { IdentityProvider } from '../../src/state/IdentityProvider';
 import { createIdentityController } from '../../src/state/identityController';
@@ -49,6 +52,18 @@ const groupchat = (
 
 const CELL_ROOM_B = 'g7_u4pruye@muc.chaterl.localhost';
 const SPOT_A = { lat: 57.64911, lng: 10.40744 };
+const MUC = 'muc.chaterl.localhost';
+// What the browser must send: the centre of each cell (hard-coded geo_service values), never the raw spot.
+const BODY_A = '{"lat":57.64869689941406,"lng":10.407485961914062}';
+const BODY_B = '{"lat":57.64869689941406,"lng":10.408859252929688}';
+const BODY_C = '{"lat":51.50733947753906,"lng":-0.1284027099609375}';
+const CELL_ROOM_C = 'g7_gcpvj0d@muc.chaterl.localhost';
+const CELL_OF_BODY: Record<string, string> = {
+  [BODY_A]: 'u4pruyd',
+  [BODY_B]: 'u4pruye',
+  [BODY_C]: 'gcpvj0d',
+};
+const LOCATE_URL = '/api/locate';
 
 const DOMAIN = 'chaterl.localhost';
 const KEY = 'nearby.identity.v1';
@@ -69,6 +84,7 @@ interface Req {
   url: string;
   body: string;
   headers: Record<string, string>;
+  signal: AbortSignal | undefined;
 }
 type Route = (req: Req) => Reply;
 
@@ -77,6 +93,21 @@ const reply = (status: number, body: unknown, headers: Record<string, string> = 
   headers: { get: (n) => headers[n.toLowerCase()] ?? null },
   text: () => Promise.resolve(JSON.stringify(body)),
 });
+
+/** The server's answer for the cell whose centre is in the body; a raw point (or anything else) is a 400. */
+const locateAnswer = (req: Req): HttpResponseLike => {
+  const cell = CELL_OF_BODY[req.body];
+  if (cell === undefined) return reply(400, { error: 'invalid_location' });
+  return reply(200, { cell, precision: 7, range: 'block', room_jid: `g7_${cell}@${MUC}` });
+};
+
+function deferred<T>(): { promise: Promise<T>; resolve(v: T): void } {
+  let resolve: (v: T) => void = () => undefined;
+  const promise = new Promise<T>((res) => {
+    resolve = res;
+  });
+  return { promise, resolve };
+}
 
 /** A timer set the tests advance by hand, so userEvent keeps working on real timers. */
 function manualTimers(): Timers & { advance(ms: number): Promise<void> } {
@@ -115,7 +146,7 @@ function manualTimers(): Timers & { advance(ms: number): Promise<void> } {
 
 interface MountOptions {
   stored?: boolean;
-  routes?: Partial<Record<'/api/session' | '/api/session/renew', Route>>;
+  routes?: Partial<Record<'/api/session' | '/api/session/renew' | '/api/locate', Route>>;
   client?: Partial<Parameters<typeof createXmppClient>[1]>;
   failStorageWrites?: boolean;
 }
@@ -125,11 +156,13 @@ interface Mounted {
   storage: MemoryStorage;
   requests: Req[];
   timers: ReturnType<typeof manualTimers>;
+  net: { online: boolean; fire(): void };
 }
 
 describe('chat flow', () => {
   let geo: FakeGeolocation;
   let controller: ReturnType<typeof createIdentityController> | null = null;
+  let assigner: ReturnType<typeof createRoomAssigner> | null = null;
 
   /** Lets the (granted) permission query settle, then delivers a device fix. */
   async function locate(point: { lat: number; lng: number } = SPOT_A): Promise<void> {
@@ -139,7 +172,17 @@ describe('chat flow', () => {
     act(() => {
       geo.emit(point.lat, point.lng);
     });
+    await settle();
   }
+
+  /** Lets the locate request, its answer and the resulting join/leave run to the end. */
+  async function settle(): Promise<void> {
+    await act(async () => {
+      for (let i = 0; i < 60; i += 1) await Promise.resolve();
+    });
+  }
+
+  const locateRequests = (requests: Req[]): Req[] => requests.filter((r) => r.url === LOCATE_URL);
 
   /** The whole app on a fake transport, a fake network and an in-memory device store. */
   function mountApp(o: MountOptions = {}): Mounted {
@@ -169,6 +212,7 @@ describe('chat flow', () => {
       },
       '/api/session/renew': () =>
         reply(200, { nickname: STORED.nickname, token: TOKEN_RENEW, token_type: 'Bearer', expires_in: 3600 }),
+      [LOCATE_URL]: locateAnswer,
       ...o.routes,
     };
     const timers = manualTimers();
@@ -180,6 +224,7 @@ describe('chat flow', () => {
           url,
           body: typeof init.body === 'string' ? init.body : '',
           headers: init.headers as Record<string, string>,
+          signal: init.signal ?? undefined,
         });
         const route = routes[url];
         if (!route) return Promise.resolve(reply(404, {}));
@@ -194,14 +239,31 @@ describe('chat flow', () => {
     const tokens = createTokenManager({ renew: session.renew, timers });
     controller = createIdentityController({ client, credentials, session, tokens });
     controller.start();
+    const net = { online: true, listeners: new Set<() => void>(), fire: () => undefined as void };
+    net.fire = () => {
+      for (const l of [...net.listeners]) l();
+    };
+    const online: OnlineSource = {
+      isOnline: () => net.online,
+      subscribe: (cb) => {
+        net.listeners.add(cb);
+        return () => {
+          net.listeners.delete(cb);
+        };
+      },
+    };
+    const locateApi = createLocateApi({ http, tokens, mucDomain: MUC });
+    assigner = createRoomAssigner({ locate: locateApi, timers, online });
     render(
       <XmppProvider client={client}>
         <IdentityProvider controller={controller}>
-          <App mucDomain="muc.chaterl.localhost" mapTileUrl={null} />
+          <RoomAssignerProvider assigner={assigner}>
+            <App mapTileUrl={null} />
+          </RoomAssignerProvider>
         </IdentityProvider>
       </XmppProvider>,
     );
-    return { t, storage, requests, timers };
+    return { t, storage, requests, timers, net };
   }
 
   /** Reports the stored identity's connection as up and waits for the chat. */
@@ -239,6 +301,8 @@ describe('chat flow', () => {
   afterEach(() => {
     controller?.dispose();
     controller = null;
+    assigner?.dispose();
+    assigner = null;
     vi.useRealTimers();
     uninstallGeo();
   });
@@ -619,11 +683,13 @@ describe('chat flow', () => {
       t.sent
         .filter((e) => e.localName === 'presence' && e.getAttribute('type') === 'unavailable')
         .map((e) => e.getAttribute('to') ?? '');
-    const pickSpotB = (): void => {
+    const pick = async (name: string): Promise<void> => {
       act(() => {
-        screen.getByRole('button', { name: 'Test spot B (next to A)' }).click();
+        screen.getByRole('button', { name }).click();
       });
+      await settle();
     };
+    const pickSpotB = (): Promise<void> => pick('Test spot B (next to A)');
     const recent = (): string => new Date(Date.now() - 3_600_000).toISOString();
     const rsmFin = (complete: boolean, first: string, last: string): Element =>
       parse(
@@ -660,7 +726,7 @@ describe('chat flow', () => {
       expect(within(screen.getByRole('log')).getByText('old message')).toBeInTheDocument();
       expect(screen.getByRole('button', { name: 'Load earlier messages' })).toBeInTheDocument();
 
-      pickSpotB();
+      await pickSpotB();
 
       expect(leavesTo(t)).toEqual([`${CELL_ROOM}/alice`]);
       expect(joinsTo(t)).toEqual([`${CELL_ROOM}/alice`, `${CELL_ROOM_B}/alice`]);
@@ -715,7 +781,7 @@ describe('chat flow', () => {
         t.pushStatus({ kind: 'disconnected' });
       });
       const sentBefore = t.sent.length;
-      pickSpotB();
+      await pickSpotB();
       expect(t.sent).toHaveLength(sentBefore);
       expect(screen.getByText('Reconnecting to the room…')).toBeInTheDocument();
 
@@ -798,7 +864,7 @@ describe('chat flow', () => {
     it('privacy: no coordinate or location field is ever put on the wire', async () => {
       const { t } = mountApp({ stored: true });
       await signInAndJoin(t);
-      pickSpotB();
+      await pickSpotB();
       act(() => {
         t.pushStanza(presence('alice', ['110'], undefined, CELL_ROOM_B));
       });
@@ -815,6 +881,262 @@ describe('chat flow', () => {
       expect(wire).not.toMatch(/57\.6|10\.40|10\.408|51\.5|\b(lat|lon|lng|latitude|longitude)\b/i);
       expect(document.body.textContent).not.toMatch(/57\.6|10\.40|10\.408/);
     }, 20_000);
+
+    describe('server-assigned rooms (POST /api/locate)', () => {
+      const area = (name: string): HTMLElement => screen.getByRole('region', { name });
+      const locateTexts = [
+        AREA_TEXT.locateUnavailable,
+        AREA_TEXT.locateOffline,
+        AREA_TEXT.locateIdentityInvalid,
+        AREA_TEXT.locateBadResponse,
+      ];
+      const noLocateText = (): void => {
+        for (const text of locateTexts) expect(screen.queryByText(text)).toBeNull();
+      };
+
+      it('(a) sends only the cell centre, once per committed cell change, with the bearer token', async () => {
+        const { t, requests } = mountApp({ stored: true });
+        await signInAndJoin(t);
+        const first = locateRequests(requests);
+        expect(first).toHaveLength(1);
+        expect(first[0]?.body).toBe(BODY_A);
+        expect(first[0]?.headers.authorization).toBe(`Bearer ${TOKEN_RENEW}`);
+        expect(joinsTo(t)).toEqual([`${CELL_ROOM}/alice`]);
+
+        const sent = t.sent.length;
+        act(() => {
+          geo.emit(57.6492, 10.4075); // same cell: a new fix, no new request
+        });
+        await settle();
+        expect(locateRequests(requests)).toHaveLength(1);
+        expect(t.sent).toHaveLength(sent);
+
+        await pickSpotB();
+        const all = locateRequests(requests);
+        expect(all).toHaveLength(2);
+        expect(all[1]?.body).toBe(BODY_B);
+        expect(leavesTo(t)).toEqual([`${CELL_ROOM}/alice`]);
+        expect(joinsTo(t)).toEqual([`${CELL_ROOM}/alice`, `${CELL_ROOM_B}/alice`]);
+      }, 20_000);
+
+      it('(b) joins nothing until the answer arrives, then joins the returned room_jid', async () => {
+        const gate = deferred<HttpResponseLike>();
+        const { t } = mountApp({ stored: true, routes: { [LOCATE_URL]: () => gate.promise } });
+        await connectStored(t);
+        await locate();
+        expect(joinsTo(t)).toEqual([]);
+        expect(screen.getByText(AREA_TEXT.assigning('Area u4pruyd'))).toBeInTheDocument();
+        expect(screen.getByLabelText('Message')).toBeDisabled();
+        gate.resolve(locateAnswer({ url: LOCATE_URL, body: BODY_A, headers: {}, signal: undefined }));
+        await settle();
+        expect(joinsTo(t)).toEqual([`${CELL_ROOM}/alice`]);
+      }, 20_000);
+
+      it('(c) keeps the old room, label and composer while the next answer is pending', async () => {
+        const gate = deferred<HttpResponseLike>();
+        const { t } = mountApp({
+          stored: true,
+          routes: { [LOCATE_URL]: (req) => (req.body === BODY_B ? gate.promise : locateAnswer(req)) },
+        });
+        await signInAndJoin(t);
+        await pickSpotB();
+        expect(leavesTo(t)).toEqual([]);
+        expect(joinsTo(t)).toEqual([`${CELL_ROOM}/alice`]);
+        expect(screen.getByText(/You're in/)).toHaveTextContent("You're in Area u4pruyd as alice");
+        expect(screen.getByLabelText('Message')).toBeEnabled();
+        expect(within(area('Your area')).getByText(AREA_TEXT.assigning('Area u4pruye'))).toBeInTheDocument();
+
+        gate.resolve(locateAnswer({ url: LOCATE_URL, body: BODY_B, headers: {}, signal: undefined }));
+        await settle();
+        expect(leavesTo(t)).toEqual([`${CELL_ROOM}/alice`]);
+        expect(joinsTo(t)).toEqual([`${CELL_ROOM}/alice`, `${CELL_ROOM_B}/alice`]);
+      }, 20_000);
+
+      it('(d) a newer pick aborts the pending request and ignores its late answer', async () => {
+        const gate = deferred<HttpResponseLike>();
+        const { t, requests } = mountApp({
+          stored: true,
+          routes: { [LOCATE_URL]: (req) => (req.body === BODY_B ? gate.promise : locateAnswer(req)) },
+        });
+        await signInAndJoin(t);
+        await pickSpotB();
+        await pick('Test spot C (far away)');
+        const all = locateRequests(requests);
+        expect(all.map((r) => r.body)).toEqual([BODY_A, BODY_B, BODY_C]);
+        expect(all[1]?.signal?.aborted).toBe(true);
+        gate.resolve(locateAnswer({ url: LOCATE_URL, body: BODY_B, headers: {}, signal: undefined }));
+        await settle();
+        expect(leavesTo(t)).toEqual([`${CELL_ROOM}/alice`]);
+        expect(joinsTo(t)).toEqual([`${CELL_ROOM}/alice`, `${CELL_ROOM_C}/alice`]);
+      }, 20_000);
+
+      it('(e) a 503 shows the message and the button, leaves the room, and recovers by itself', async () => {
+        let calls = 0;
+        const { t, timers } = mountApp({
+          stored: true,
+          routes: {
+            [LOCATE_URL]: (req) => {
+              if (req.body === BODY_B) {
+                calls += 1;
+                if (calls === 1) return reply(503, { error: 'service_unavailable' }, { 'retry-after': '5' });
+              }
+              return locateAnswer(req);
+            },
+          },
+        });
+        await signInAndJoin(t);
+        await pickSpotB();
+        expect(screen.getByText(AREA_TEXT.locateUnavailable)).toBeInTheDocument();
+        expect(screen.getByRole('button', { name: AREA_TEXT.retryAssign })).toBeInTheDocument();
+        expect(leavesTo(t)).toEqual([`${CELL_ROOM}/alice`]);
+        expect(screen.getByLabelText('Message')).toBeDisabled();
+        expect(screen.getByText(AREA_TEXT.emptyUnassigned)).toBeInTheDocument();
+
+        await act(async () => {
+          await timers.advance(4_999);
+        });
+        expect(calls).toBe(1);
+        await act(async () => {
+          await timers.advance(1);
+        });
+        await settle();
+        expect(calls).toBe(2);
+        expect(joinsTo(t)).toEqual([`${CELL_ROOM}/alice`, `${CELL_ROOM_B}/alice`]);
+        noLocateText();
+      }, 20_000);
+
+      it('(e2) "Find my area chat" retries at once', async () => {
+        let calls = 0;
+        const { t } = mountApp({
+          stored: true,
+          routes: {
+            [LOCATE_URL]: (req) => {
+              calls += 1;
+              return calls === 1 ? reply(503, { error: 'service_unavailable' }) : locateAnswer(req);
+            },
+          },
+        });
+        const user = userEvent.setup({ delay: null });
+        await connectStored(t);
+        await locate();
+        expect(screen.getByText(AREA_TEXT.locateUnavailable)).toBeInTheDocument();
+        await user.click(screen.getByRole('button', { name: AREA_TEXT.retryAssign }));
+        await settle();
+        expect(calls).toBe(2);
+        expect(joinsTo(t)).toEqual([`${CELL_ROOM}/alice`]);
+        expect(document.activeElement).toBe(area('Your area'));
+      }, 20_000);
+
+      it('(f) offline: no request and an offline message; coming back online asks and joins', async () => {
+        const { t, requests, net } = mountApp({ stored: true });
+        await connectStored(t);
+        net.online = false;
+        await locate();
+        expect(locateRequests(requests)).toHaveLength(0);
+        expect(screen.getByText(AREA_TEXT.locateOffline)).toBeInTheDocument();
+        net.online = true;
+        act(() => {
+          net.fire();
+        });
+        await settle();
+        expect(locateRequests(requests)).toHaveLength(1);
+        expect(joinsTo(t)).toEqual([`${CELL_ROOM}/alice`]);
+        noLocateText();
+      }, 20_000);
+
+      it('(g) a 401 on the first token renews and retries without an error', async () => {
+        let calls = 0;
+        const { t, requests } = mountApp({
+          stored: true,
+          routes: {
+            [LOCATE_URL]: (req) => {
+              calls += 1;
+              return calls === 1 ? reply(401, { error: 'unauthorized' }) : locateAnswer(req);
+            },
+          },
+        });
+        await signInAndJoin(t);
+        expect(calls).toBe(2);
+        expect(requests.filter((r) => r.url === '/api/session/renew')).toHaveLength(2);
+        expect(joinsTo(t)).toEqual([`${CELL_ROOM}/alice`]);
+        noLocateText();
+      }, 20_000);
+
+      it('(h) a rejected identity: no locate request, no join, the message and the Start over banner', async () => {
+        const { t, requests } = mountApp({
+          stored: true,
+          routes: { '/api/session/renew': () => reply(401, { error: 'invalid_credentials' }) },
+        });
+        await connectStored(t);
+        await locate();
+        expect(locateRequests(requests)).toHaveLength(0);
+        expect(joinsTo(t)).toEqual([]);
+        expect(screen.getByText(AREA_TEXT.locateIdentityInvalid)).toBeInTheDocument();
+        expect(screen.queryByRole('button', { name: AREA_TEXT.retryAssign })).toBeNull();
+        expect(screen.getByRole('alert')).toHaveTextContent(IDENTITY_TEXT.identityInvalid);
+      }, 20_000);
+
+      it('(i) a room_jid on another domain is rejected and nothing is joined', async () => {
+        const { t } = mountApp({
+          stored: true,
+          routes: {
+            [LOCATE_URL]: () =>
+              reply(200, {
+                cell: 'u4pruyd',
+                precision: 7,
+                range: 'block',
+                room_jid: 'g7_u4pruyd@muc.evil.example',
+              }),
+          },
+        });
+        await connectStored(t);
+        await locate();
+        expect(screen.getByText(AREA_TEXT.locateBadResponse)).toBeInTheDocument();
+        expect(joinsTo(t)).toEqual([]);
+        expect(document.body.textContent).not.toContain('evil');
+      }, 20_000);
+
+      it('(j) losing the location while located leaves the room', async () => {
+        const { t } = mountApp({ stored: true });
+        await signInAndJoin(t);
+        act(() => {
+          geo.fail(1);
+        });
+        await settle();
+        expect(leavesTo(t)).toEqual([`${CELL_ROOM}/alice`]);
+        expect(screen.getByLabelText('Message')).toBeDisabled();
+      }, 20_000);
+
+      it('(k) privacy: no coordinate in a store, the console, or a request body', async () => {
+        const spies = (['log', 'info', 'warn', 'error', 'debug'] as const).map((m) =>
+          vi.spyOn(console, m).mockImplementation(() => undefined),
+        );
+        const { t, requests } = mountApp({ stored: true });
+        await signInAndJoin(t);
+        await pickSpotB();
+        await pick('Test spot C (far away)');
+
+        const bodies = locateRequests(requests).map((r) => r.body);
+        expect(bodies).toEqual([BODY_A, BODY_B, BODY_C]);
+        expect(
+          bodies.some((b) => /57\.64911|10\.40744|10\.4087\b|51\.5074\b|-0\.1278|accuracy|range/.test(b)),
+        ).toBe(false);
+
+        const stores = JSON.stringify([
+          useRoomStore.getState(),
+          useSessionStore.getState(),
+          useIdentityStore.getState(),
+        ]);
+        expect(stores).not.toMatch(/57\.64|10\.40|51\.50|"lat"|"lng"/);
+
+        const logged = spies
+          .flatMap((s) => s.mock.calls)
+          .map((args) => args.map((a) => String(a)).join(' '))
+          .join('\n');
+        expect(logged).not.toMatch(/57\.6|10\.40|51\.50|"lat"|"lng"/);
+        for (const s of spies) s.mockRestore();
+      }, 20_000);
+    });
   });
 
   describe('room history', () => {

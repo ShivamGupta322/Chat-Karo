@@ -6,7 +6,7 @@ import type { Cell } from './cell';
 import { DEV_MAP_TEXT } from './devLocationText';
 import { DEV_PRESETS } from './devPresets';
 import { decodeGeohashBounds, wrapLng } from './geohash';
-import type { GeoPoint } from './useArea';
+import type { GeoPoint } from './cell';
 
 export interface DevMapProps {
   tileUrl: string;

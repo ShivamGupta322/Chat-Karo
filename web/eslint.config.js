@@ -29,13 +29,31 @@ const API_LEAF = {
   group: ['../*', '../**'],
   message: 'src/api/ is a leaf: it imports nothing from the rest of the app.',
 };
+const API_LOCATE = {
+  group: ['**/api/locate', '**/api/locate.*'],
+  message:
+    'Only src/geo/ and src/main.tsx may import api/locate: a location leaves geo/ only through it.',
+};
+const API_LOCATE_SIBLING = {
+  group: ['./locate', './locate.*'],
+  message: 'api/locate is never re-exported: only src/geo/ and src/main.tsx import it directly.',
+};
+const GEO_STATE = {
+  group: ['**/geo', '**/geo/*'],
+  message: 'src/state/ must not depend on geo/: stores never hold a location.',
+};
 const restrict = (...patterns) => ['error', { patterns }];
 
 // Network and storage are confined to src/api/ (ADR-019 D4). Flat config replaces a rule wholesale per
 // block, so each block below re-lists everything it still needs from these constants.
 const NET_MESSAGE = 'Only src/api/ may make network requests.';
 const STORAGE_MESSAGE = 'Only src/api/deviceCredential.ts may use browser storage.';
+const SOCKET_MESSAGE = 'Only src/xmpp/strophe/ may open WebSockets or event streams.';
+const BROWSER_STATE_MESSAGE =
+  'No cookies or Cache Storage: the only browser storage is src/api/deviceCredential.ts.';
 const NET_GLOBALS = ['fetch', 'XMLHttpRequest'];
+const SOCKET_GLOBALS = ['WebSocket', 'EventSource'];
+const BROWSER_STATE_GLOBALS = ['caches', 'cookieStore'];
 const STORAGE_GLOBALS = ['localStorage', 'sessionStorage', 'indexedDB'];
 const globalsRule = (names, message) => names.map((name) => ({ name, message }));
 const propertiesRule = (names, message) =>
@@ -47,6 +65,12 @@ const NET_PROPERTIES = [
   { object: 'navigator', property: 'sendBeacon', message: NET_MESSAGE },
 ];
 const STORAGE_PROPERTIES = propertiesRule(STORAGE_GLOBALS, STORAGE_MESSAGE);
+const SOCKET_PROPERTIES = propertiesRule(SOCKET_GLOBALS, SOCKET_MESSAGE);
+// {property: 'cookie'} with no object also catches document.cookie and window.document.cookie.
+const BROWSER_STATE_PROPERTIES = [
+  ...propertiesRule(BROWSER_STATE_GLOBALS, BROWSER_STATE_MESSAGE),
+  { property: 'cookie', message: BROWSER_STATE_MESSAGE },
+];
 const restrictList = (...lists) => ['error', ...lists.flat()];
 
 export default tseslint.config(
@@ -67,11 +91,28 @@ export default tseslint.config(
       'no-restricted-globals': restrictList(
         globalsRule(NET_GLOBALS, NET_MESSAGE),
         globalsRule(STORAGE_GLOBALS, STORAGE_MESSAGE),
+        globalsRule(SOCKET_GLOBALS, SOCKET_MESSAGE),
+        globalsRule(BROWSER_STATE_GLOBALS, BROWSER_STATE_MESSAGE),
       ),
-      'no-restricted-properties': restrictList(NET_PROPERTIES, STORAGE_PROPERTIES),
+      'no-restricted-properties': restrictList(
+        NET_PROPERTIES,
+        STORAGE_PROPERTIES,
+        SOCKET_PROPERTIES,
+        BROWSER_STATE_PROPERTIES,
+      ),
       // Everywhere: strophe stays in src/xmpp/strophe, and only the geo index is importable.
-      'no-restricted-imports': restrict(STROPHE, GEO_DEEP, LEAFLET),
+      'no-restricted-imports': restrict(STROPHE, GEO_DEEP, LEAFLET, API_LOCATE),
     },
+  },
+  {
+    // Stores never depend on geo/ and never import api/locate.
+    files: ['src/state/**'],
+    rules: { 'no-restricted-imports': restrict(STROPHE, GEO_STATE, LEAFLET, API_LOCATE) },
+  },
+  {
+    // main.tsx wires api/locate into the room assigner (it may import geo/ internals as the index only).
+    files: ['src/main.tsx'],
+    rules: { 'no-restricted-imports': restrict(STROPHE, GEO_DEEP, LEAFLET) },
   },
   {
     // The transport layer never imports geo at all.
@@ -91,9 +132,17 @@ export default tseslint.config(
     // src/api/ is a leaf that may fetch but never store, and stays silent (no console: it handles secrets).
     files: ['src/api/**'],
     rules: {
-      'no-restricted-imports': restrict(STROPHE, LEAFLET, API_LEAF),
-      'no-restricted-globals': restrictList(globalsRule(STORAGE_GLOBALS, STORAGE_MESSAGE)),
-      'no-restricted-properties': restrictList(STORAGE_PROPERTIES),
+      'no-restricted-imports': restrict(STROPHE, LEAFLET, API_LEAF, API_LOCATE_SIBLING),
+      'no-restricted-globals': restrictList(
+        globalsRule(STORAGE_GLOBALS, STORAGE_MESSAGE),
+        globalsRule(SOCKET_GLOBALS, SOCKET_MESSAGE),
+        globalsRule(BROWSER_STATE_GLOBALS, BROWSER_STATE_MESSAGE),
+      ),
+      'no-restricted-properties': restrictList(
+        STORAGE_PROPERTIES,
+        SOCKET_PROPERTIES,
+        BROWSER_STATE_PROPERTIES,
+      ),
       'no-console': ['error', {}],
     },
   },
@@ -104,10 +153,14 @@ export default tseslint.config(
       'no-restricted-globals': restrictList(
         globalsRule(NET_GLOBALS, NET_MESSAGE),
         globalsRule(['sessionStorage', 'indexedDB'], STORAGE_MESSAGE),
+        globalsRule(SOCKET_GLOBALS, SOCKET_MESSAGE),
+        globalsRule(BROWSER_STATE_GLOBALS, BROWSER_STATE_MESSAGE),
       ),
       'no-restricted-properties': restrictList(
         NET_PROPERTIES,
         propertiesRule(['sessionStorage', 'indexedDB'], STORAGE_MESSAGE),
+        SOCKET_PROPERTIES,
+        BROWSER_STATE_PROPERTIES,
       ),
     },
   },
@@ -124,7 +177,20 @@ export default tseslint.config(
   {
     // The strophe adapter may import strophe.js, but still not geo.
     files: ['src/xmpp/strophe/**'],
-    rules: { 'no-restricted-imports': restrict(GEO_ANY, API_ANY, LEAFLET) },
+    rules: {
+      'no-restricted-imports': restrict(GEO_ANY, API_ANY, LEAFLET),
+      // Leaving SOCKET out permits WebSocket here; everything else still applies.
+      'no-restricted-globals': restrictList(
+        globalsRule(NET_GLOBALS, NET_MESSAGE),
+        globalsRule(STORAGE_GLOBALS, STORAGE_MESSAGE),
+        globalsRule(BROWSER_STATE_GLOBALS, BROWSER_STATE_MESSAGE),
+      ),
+      'no-restricted-properties': restrictList(
+        NET_PROPERTIES,
+        STORAGE_PROPERTIES,
+        BROWSER_STATE_PROPERTIES,
+      ),
+    },
   },
   {
     // Tests may reach into geo/ internals; only the strophe wire tests may import strophe.js.

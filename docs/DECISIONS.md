@@ -38,7 +38,7 @@ archive rows in PostgreSQL. MongoDB `rooms.lastActiveAt` and `reports.createdAt`
 **Consequences:** Simple; no per-message timers.
 
 ## ADR-005 — Server-side room assignment; coordinates never stored
-**Status:** Accepted. Amended by ADR-019 D3 (lands in 3e-3): the client sends its precision-7 cell centre, not its raw fix.
+**Status:** Accepted. Amended by ADR-019 D3 (landed in 3e-3): the client sends its precision-7 cell centre, not its raw fix.
 **Context:** Computing the geohash on the client is most private but gives no spoofing control.
 **Decision:** Client sends coordinates to geo_service over HTTPS; geo_service validates, rate-limits,
 computes the cell, then discards coordinates. Only the last cell centre + timestamp is kept in ETS
@@ -375,7 +375,7 @@ the ≥ 1100 ms global throttle and one query per room are unchanged.
   the user's OK).
 
 ## ADR-013 — Temporary client-side cell assignment and location states
-**Status:** Accepted (Phase 2, slice 2c-1, 2026-11-19). A **temporary deviation from ADR-005** until Phase 3. Builds on
+**Status:** Accepted (Phase 2, slice 2c-1, 2026-11-19). A **temporary deviation from ADR-005** until Phase 3. **Partly superseded by ADR-019 (3e-3):** the client no longer assigns rooms (`roomJidForCell` deleted); section 2: the cell centre leaves `geo/` via `api/locate.ts`; section 3: the triggers now drive `/api/locate`; section 4: the controller consumes the server's `room_jid`. Sections 1 and 5-8 stand; "anyone can join any `g7_` room" stays until 3f. Builds on
 ADR-001 (cells), ADR-008 (transport seam, instant rooms) and ADR-009 (tokens, plain-language text).
 **Context:** Phase 2 ends with "client-side geohash, join room, chat" before geo_service exists. ADR-005 says the server
 assigns rooms and coordinates are never stored; this slice has to compute the cell in the browser.
@@ -952,7 +952,7 @@ printed; request bodies sent from files):
   later line went out unredacted); a following line with an `xp1_` test string came out `[REDACTED]`.
 
 ## ADR-019 — Session renewal (POST /api/session/renew) and the client switch design
-**Status:** Accepted. Server part 3e-1. Client identity 3e-2: D1, D2 (token manager; first use in 3e-3), D4 (network, storage and xmpp guards; the locate guard comes in 3e-3), D5, D6, D7. D3 confirmed 2026-11-21, lands in 3e-2/3e-3.
+**Status:** Accepted. Server part 3e-1. Client identity 3e-2: D1, D2 (token manager; first use in 3e-3), D4 (network, storage and xmpp guards; the locate guard comes in 3e-3), D5, D6, D7. D3 confirmed 2026-11-21; D3 and D4 landed in 3e-3.
 **Context:** A returning device holds `{jid, xmpp_password}` (ADR-017) but its 1 h API token is gone. It needs a way to get a
 fresh token without a second identity, an email or a cookie. The request body carries a live credential, so the handler
 must not let it reach a log or a crash report (ADR-018 section 4b reasoning). Probed live on MongooseIM 6.2.1 by the
@@ -1128,3 +1128,86 @@ that case fails, so the test is not vacuous.
   now…", MongooseIM stopped) 360; Chat with the identity-invalid notice (profile deleted, renew 401: "Nearby can't confirm
   your name anymore…", still Online, nothing wiped) 360. The connecting view was not measured: with MongooseIM stopped it
   passes too quickly to sample. Cleanup: LiveE3e and LiveF3e removed; `listUsers` shows only alice and bob.
+
+### Client implementation (3e-3)
+- **The assigner.** `geo/roomAssigner.ts` is framework-free and built once in `main.tsx` (like the token manager); `useRoomAssignment(cell)`
+  in `geo/RoomAssignment.tsx` points it at the committed cell (keyed on the geohash string) and reads its state through
+  `useSyncExternalStore` (`getState` returns the same object until something changes). States: `none`, `assigning` (carries the
+  previous room, kept), `assigned`, `failed` (reason; room always null, so the client leaves). The same geohash as the current target
+  is a no-op in any state; a different cell aborts the in-flight request, bumps a generation counter and starts one new request;
+  a result from an older generation is ignored. `assign(null)` aborts, cancels the retry timer and goes to `none`. The cell centre is
+  a local inside the request function; state holds only the Cell and `{jid, cell}`.
+- **What leaves the browser.** `api/locate.ts` posts exactly `{"lat","lng"}` (built from the two fields, never spread; no accuracy, no
+  range) and it is the centre of the local precision-7 cell (`cellCentre`), never the raw fix. Tests use hard-coded oracle centres
+  (u4pruyd 57.64869689941406, 10.407485961914062 equals the Erlang-computed value in the ADR-018 live evidence), never values derived
+  from `cellCentre` itself. The request goes through `tokens.withToken` with a 10 s timeout and the abort signal.
+- **Validation by equality, not a regex.** A 200 answer is accepted only if `cell` matches `^[0-9b-hjkmnp-z]{5,7}$`, `precision` is an
+  integer 5, 6 or 7 equal to `cell.length`, `range` is block/neighbourhood/area (US spelling invalid) with 7/6/5 matching, and
+  `room_jid` equals "g" + precision + "_" + cell + "@" + mucDomain by exact string equality (no resource, no foreign domain, no look-alike). Equality
+  is stricter than any room-address regex and means the client never builds room addresses: it only checks the server's. The assigner
+  then also requires `block`, 7 and the requested geohash, else `bad-response` (nothing joined).
+- **Error mapping.**
+
+  | Outcome | Result | Reason |
+  |---|---|---|
+  | http 500/502/503/504 | unavailable (carries retry-after) | transient server side |
+  | timeout, network | unavailable | transient |
+  | token reason unavailable or stopped | unavailable | transient, or terminal on the token side; the assigner backs off to 30 s and sends no request until a token is available |
+  | token reason offline | offline | resumes on the online event |
+  | token reason identity-invalid | identity-invalid | the banner offers Start over; a retry cannot help |
+  | `{kind:'unauthorized'}` (second 401 after one renew and one retry) | bad-response | the server rejects a freshly renewed token; retrying the same way cannot help |
+  | any other http status (400, 404, 405, 413, 415...), a non-200 2xx, an http bad-response | bad-response | a client or contract bug, not transient |
+  | aborted | aborted | our own cancel |
+
+  `api/locate.ts` never throws and never logs.
+- **Keep-room and null-on-failure.** A switch keeps the old room while the new answer is pending (the composer stays usable, the label
+  uses the room's own cell). A failure or lost location makes the desired room null, so `useAreaRoom` leaves; `failed.room` is always null.
+- **Retry policy.** unavailable retries automatically after `max(retryAfterMs ?? 0, min(5000 * 2^attempt, 30000))` (attempt resets on success
+  and on a new cell). If `online.isOnline()` is false when a request would start or when an unavailable returns, the state is
+  `failed: offline` with no request and no timer; the online event retries a failed offline/unavailable at once. identity-invalid and
+  bad-response never retry by themselves; `retry()` ("Find my area chat") is immediate in any failed state and cancels a pending timer.
+  `browserOnline` is exported from `api/` and reused (no second copy).
+- **Aborted requests can still touch the room.** A fetch abort does not stop the server, so an abandoned cell can still be upserted by
+  `touch_room`. Accepted: it is a cell, not a position.
+- **Lint guards (ADR-019 D4, extended).** `api/locate` may only be imported by `src/geo/`, `src/main.tsx` and tests, and `api/index.ts` must
+  not re-export it; `src/state/` cannot import `geo/`; `WebSocket` and `EventSource` only in `src/xmpp/strophe/`; no `caches`,
+  `cookieStore` or `document.cookie` anywhere. Each guard and each allowed place is proven by a fixture test in
+  `tests/lint/boundaries.test.ts`. `no-restricted-imports` does not see a dynamic `import('../api/locate')`, so the guard
+  is a strong default, not airtight; review catches the rest.
+- **Dropped.** `roomJidForCell`, the geo_service drift guard on it (`cell_guard`), and `LOCATE_TIMEOUT_MS` in `session.ts` (now in `locate.ts`).
+  `isRecord` and `statusError` moved to `api/http.ts` (not re-exported).
+- **Bundle.** JS 273 163 B raw (85.98 kB gzip by vite), CSS 16 769 B; +5 322 B against the 267 841 B baseline, 1 322 B over the +4 000 B budget. Reported, not trimmed (the plan said not to cut copy or accessibility to fit): the new code is the locate API client with validation and error mapping, the room assigner with its retry policy, and the extra AreaPanel states. No dependency was added; the dev-only strings and Leaflet are absent from the build. The supervisor accepted the overrun (2026-11-22); **273 163 B is the new baseline**, so the next slice's +4 000 B budget gives a ceiling of 277 163 B.
+
+### Live evidence (3e-3)
+**2026-11-22, in-app browser pane, `npm run dev`, geo_service image at 4d90200 (source unchanged in 3e-3), all four services healthy:**
+- Recording: page-level wrappers stored every `fetch` (url, body, status) and every WebSocket frame both ways; values were
+  checked in the page as booleans and counts, never printed.
+- Two pseudonymous users, `?identity=a` (`tester_a`) and `?identity=b` (`tester_b`), both at test spot A: each sent one
+  `POST /api/locate` → 200 and joined `g7_u4pruyd@muc.chaterl.localhost/<nick>`, the room the server returned. Messages delivered
+  both ways.
+- Mongo `rooms` doc `g7_u4pruyd`: exactly six keys (`_id, center, createdAt, geohash, lastActiveAt, precision`), precision 7,
+  `center.coordinates` `[10.407485961914062, 57.64869689941406]`; `lastActiveAt` advanced 14:04:58 → 14:07:05 after spot B and back to A.
+- One request per cell change: A → B gave 1 locate, 1 unavailable presence to the old room and 1 join of `g7_u4pruye`; B again
+  gave 0 locates and 0 stanzas; B → A gave 1 locate. The locate bodies in tab A equal exactly
+  `[A centre, B centre, A centre]` (the oracle strings above); no body matches `57\.64911|10\.40744|10\.4087\b|accuracy|range`.
+- Reconnects do not locate: both tabs dropped and reconnected while in the background (the known hidden-tab drop, see ADR-010),
+  at least twice in tab A, and the locate count stayed one per move. The reconnects left stream-management ghosts (`tester_a-2`,
+  `tester_b-2` in the occupant list until the old session times out). Same behaviour as before 3e-3, not caused by this slice.
+- No coordinates outside `/api/locate`: 0 hits for `57\.6|10\.40|51\.50|-0\.12|\b(lat|lng|lon|latitude|longitude)\b` in 252 WS
+  frames and in the console of both tabs; geo_service logs (224 lines, after all tests) 0 hits for the cell-centre digits of
+  A/B/C, the raw spot values, `locate_`, `tampered`, `eyJ` and `xp1_`.
+- Mongo outage: `docker compose stop mongo`, spot C → 503, retried after 5 s → "Nearby can't reach your area chat right now. We'll
+  keep trying." with "Find my area chat", the old room left, composer disabled. `start mongo` → 503 ×4 in total, then 200 and a
+  join of `g7_gcpvj0d` with no click; geo_service RestartCount 0.
+- Token path: the first locate after arming a wrapper carried `Bearer tampered.tampered.tampered` (only that header replaced) →
+  `/api/locate` 401, `/api/session/renew` 200, retried `/api/locate` 200, joined `g7_u4pruyd`, no error text.
+- Identity invalid: `tester_b`'s profile deleted in Mongo, reload → renew 401 → "Nearby can't confirm your name anymore…" (still
+  Online); spot A → "Nearby can't find your area chat because it can't confirm your name. To chat here, start over with a new
+  name." with no retry button, 0 `/api/locate`, 0 joins.
+- Storage: localStorage only `nearby.identity.v1.a` and `.b`; sessionStorage and cookies empty; no JWT-shaped or coordinate value stored.
+- 360×640, Chat in the unavailable state (Mongo stopped): `scrollWidth` 360.
+- Production build (re-run by the orchestrator): JS 273 163 B (gzip 85 853 B by `gzip -c | wc -c`), CSS 16 769 B; 0 hits for
+  `Test spot A|Test locations|leaflet|openstreetmap|57\.64911|10\.40744|roomJidForCell`, 1 for `Find my area chat`. Over the
+  271 841 B ceiling by 1 322 B (see Bundle above).
+- Cleanup: `tester_a` and `tester_b` removed with `mongooseimctl account removeUser`, their profiles and the three test rooms deleted
+  (`rooms` empty); `listUsers` shows alice, bob and two accounts created by the owner outside this test (kept); browser storage cleared.

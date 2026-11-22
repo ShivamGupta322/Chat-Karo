@@ -1,4 +1,4 @@
-import type { GeoPoint } from './useArea';
+import type { GeoPoint } from './cell';
 
 /** Dev only. Public sample points: A and B are neighbouring cells, C is a different city. */
 export const DEV_PRESETS: readonly { id: 'A' | 'B' | 'C'; point: GeoPoint }[] = [

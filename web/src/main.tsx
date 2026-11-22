@@ -7,9 +7,11 @@ import {
   createSessionApi,
   createTokenManager,
 } from './api';
+import { createLocateApi } from './api/locate';
 import { DEV_SLOT_WARNING, readDevIdentitySlot } from './api/devIdentitySlot';
 import { ConfigError } from './components/ConfigError';
 import { parseConfig } from './config';
+import { createRoomAssigner, RoomAssignerProvider } from './geo';
 import './index.css';
 import { IdentityProvider } from './state/IdentityProvider';
 import { createIdentityController } from './state/identityController';
@@ -47,6 +49,8 @@ if (!result.ok) {
   const session = createSessionApi(http, { xmppDomain: config.xmppDomain });
   const credentials = createCredentialStore({ xmppDomain: config.xmppDomain, slot: devSlot.slot });
   const tokens = createTokenManager({ renew: session.renew });
+  const locate = createLocateApi({ http, tokens, mucDomain: config.mucDomain });
+  const assigner = createRoomAssigner({ locate });
   const identity = createIdentityController({ client, credentials, session, tokens });
   // Before the first render: a returning device shows "Signing you in" at once, never a flash of Welcome.
   identity.start();
@@ -55,7 +59,9 @@ if (!result.ok) {
     <React.StrictMode>
       <XmppProvider client={client}>
         <IdentityProvider controller={identity}>
-          <App mucDomain={config.mucDomain} mapTileUrl={config.mapTileUrl} />
+          <RoomAssignerProvider assigner={assigner}>
+            <App mapTileUrl={config.mapTileUrl} />
+          </RoomAssignerProvider>
         </IdentityProvider>
       </XmppProvider>
     </React.StrictMode>,

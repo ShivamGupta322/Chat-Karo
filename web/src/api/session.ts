@@ -1,11 +1,9 @@
 import type { DeviceCredential } from './deviceCredential';
-import type { ApiError, ApiResult, Http, HttpResponse } from './http';
+import { isRecord, statusError, type ApiError, type ApiResult, type Http } from './http';
 import { isValidNickname, isValidPassword, jidPattern } from './identityRules';
 
 export const SESSION_TIMEOUT_MS = 15_000;
 export const RENEW_TIMEOUT_MS = 15_000;
-/** Used by /api/locate in slice 3e-3. */
-export const LOCATE_TIMEOUT_MS = 10_000;
 
 export interface CreatedSession {
   credential: DeviceCredential;
@@ -26,22 +24,6 @@ export interface SessionApi {
 
 const BAD: ApiError = { kind: 'bad-response' };
 const TOKEN_RE = /^[A-Za-z0-9._-]{1,4096}$/;
-const CODE_RE = /^[a-z_]{1,64}$/;
-
-function isRecord(v: unknown): v is Record<string, unknown> {
-  return typeof v === 'object' && v !== null && !Array.isArray(v);
-}
-
-/** null when the response has the expected success status; otherwise the error to return. */
-function statusError(res: HttpResponse, expected: number): ApiError | null {
-  if (res.status === expected) return null;
-  if (res.status >= 200 && res.status < 300) return BAD;
-  const code =
-    isRecord(res.body) && typeof res.body.error === 'string' && CODE_RE.test(res.body.error)
-      ? res.body.error
-      : null;
-  return { kind: 'http', status: res.status, code, retryAfterMs: res.retryAfterMs };
-}
 
 function tokenFields(b: Record<string, unknown>): { token: string; expiresIn: number } | null {
   const { token, token_type: tokenType, expires_in: expiresIn } = b;

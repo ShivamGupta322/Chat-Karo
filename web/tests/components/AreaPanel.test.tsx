@@ -3,16 +3,36 @@ import userEvent from '@testing-library/user-event';
 import { useState } from 'react';
 import { describe, expect, it, vi } from 'vitest';
 import { AreaPanel } from '../../src/components/AreaPanel';
-import type { AreaState } from '../../src/geo';
+import type { AreaState, RoomAssignment } from '../../src/geo';
 import { AREA_TEXT } from '../../src/ui/text';
 
 const CELL = { precision: 7, geohash: 'u4pruyd' } as const;
+const ASSIGNED: RoomAssignment = {
+  status: 'assigned',
+  cell: CELL,
+  room: { jid: 'g7_u4pruyd@muc.chaterl.localhost', cell: 'u4pruyd' },
+};
+const LOCATED: AreaState = { status: 'located', cell: CELL, source: 'device', moved: false };
 
-function panel(area: AreaState, extra: { devHint?: boolean } = {}) {
+function panel(
+  area: AreaState,
+  extra: { devHint?: boolean; assignment?: RoomAssignment } = {},
+) {
   const onShare = vi.fn();
   const onSwitchArea = vi.fn();
-  render(<AreaPanel area={area} onShare={onShare} onSwitchArea={onSwitchArea} {...extra} />);
-  return { onShare, onSwitchArea };
+  const onRetryAssign = vi.fn();
+  const { assignment = area.status === 'located' ? ASSIGNED : { status: 'none', room: null }, ...rest } = extra;
+  render(
+    <AreaPanel
+      area={area}
+      assignment={assignment}
+      onShare={onShare}
+      onSwitchArea={onSwitchArea}
+      onRetryAssign={onRetryAssign}
+      {...rest}
+    />,
+  );
+  return { onShare, onSwitchArea, onRetryAssign };
 }
 
 describe('AreaPanel', () => {
@@ -109,7 +129,9 @@ describe('AreaPanel', () => {
           onShare={() => {
             setArea({ status: 'requesting' });
           }}
+          assignment={{ status: 'none', room: null }}
           onSwitchArea={() => undefined}
+          onRetryAssign={() => undefined}
         />
       );
     }
@@ -131,7 +153,9 @@ describe('AreaPanel', () => {
           onShare={() => {
             setArea({ status: 'denied' });
           }}
+          assignment={{ status: 'none', room: null }}
           onSwitchArea={() => undefined}
+          onRetryAssign={() => undefined}
         />
       );
     }
@@ -139,6 +163,82 @@ describe('AreaPanel', () => {
     await user.tab();
     await user.keyboard('{Enter}');
     expect(screen.getByRole('button', { name: AREA_TEXT.tryAgain })).toHaveFocus();
+  });
+
+  describe('room assignment', () => {
+    const failed = (reason: 'unavailable' | 'offline' | 'identity-invalid' | 'bad-response'): RoomAssignment => ({
+      status: 'failed',
+      cell: CELL,
+      reason,
+      room: null,
+    });
+
+    it.each([
+      ['unavailable', AREA_TEXT.locateUnavailable],
+      ['offline', AREA_TEXT.locateOffline],
+      ['bad-response', AREA_TEXT.locateBadResponse],
+    ] as const)('%s shows its text and the retry button', async (reason, text) => {
+      const user = userEvent.setup({ delay: null });
+      const { onRetryAssign, onShare, onSwitchArea } = panel(LOCATED, { assignment: failed(reason) });
+      expect(screen.getByRole('status')).toHaveTextContent(text);
+      await user.click(screen.getByRole('button', { name: 'Find my area chat' }));
+      expect(onRetryAssign).toHaveBeenCalledTimes(1);
+      expect(onShare).not.toHaveBeenCalled();
+      expect(onSwitchArea).not.toHaveBeenCalled();
+    });
+
+    it('identity-invalid shows its text and no button', () => {
+      panel(LOCATED, { assignment: failed('identity-invalid') });
+      expect(screen.getByRole('status')).toHaveTextContent(AREA_TEXT.locateIdentityInvalid);
+      expect(screen.queryAllByRole('button')).toHaveLength(0);
+    });
+
+    it('shows the assigning text for the area, with no button', () => {
+      panel(LOCATED, { assignment: { status: 'assigning', cell: CELL, room: null } });
+      expect(screen.getByRole('status')).toHaveTextContent('Finding the chat for Area u4pruyd…');
+      expect(screen.queryAllByRole('button')).toHaveLength(0);
+    });
+
+    it('a failure takes precedence over "moved"', () => {
+      panel({ ...LOCATED, moved: true }, { assignment: failed('unavailable') });
+      expect(screen.getByRole('status')).toHaveTextContent(AREA_TEXT.locateUnavailable);
+      expect(screen.queryByRole('button', { name: AREA_TEXT.switchArea })).toBeNull();
+    });
+
+    it('moved still shows when the room is assigned', () => {
+      panel({ ...LOCATED, moved: true });
+      expect(screen.getByRole('status')).toHaveTextContent(AREA_TEXT.moved);
+    });
+
+    it('moves focus to the panel when the focused retry button disappears', async () => {
+      const user = userEvent.setup({ delay: null });
+      function Flow(): React.JSX.Element {
+        const [assignment, setAssignment] = useState<RoomAssignment>(failed('unavailable'));
+        return (
+          <AreaPanel
+            area={LOCATED}
+            assignment={assignment}
+            onShare={() => undefined}
+            onSwitchArea={() => undefined}
+            onRetryAssign={() => {
+              setAssignment({ status: 'assigning', cell: CELL, room: null });
+            }}
+          />
+        );
+      }
+      render(<Flow />);
+      await user.tab();
+      expect(screen.getByRole('button', { name: AREA_TEXT.retryAssign })).toHaveFocus();
+      await user.keyboard('{Enter}');
+      expect(screen.queryByRole('button')).toBeNull();
+      expect(screen.getByRole('region', { name: AREA_TEXT.heading })).toHaveFocus();
+    });
+
+    it('never renders a room address while assigned or failed', () => {
+      panel(LOCATED);
+      expect(document.body.textContent).not.toContain('@muc');
+      expect(document.body.textContent).not.toContain('g7_');
+    });
   });
 
   it('never renders an address or room name', () => {

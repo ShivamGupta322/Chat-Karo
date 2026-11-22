@@ -63,8 +63,15 @@ Carry-forward for the next slices (from the 2a/2a+ reviews):
       which cells are active, a location leak) and restrict room creation to geo_service/admin
 - [x] Slice 3e-1: `POST /api/session/renew` (server, ADR-019, verified live 2026-11-21)
 - [x] Slice 3e-2: client identity (Welcome, device credential, token manager; verified live 2026-11-21)
-- [ ] Client switches to `/api/locate` for room assignment (3e-2: client identity, Welcome page, token manager; 3e-3: locate switch, server-assigned rooms)
-- **Demo:** rooms assigned by the server, recorded in MongoDB
+- [x] Client switches to `/api/locate` for room assignment (3e-3: only the cell centre is sent, server-assigned rooms, ADR-019, verified live 2026-11-22)
+- **Demo:** rooms assigned by the server, recorded in MongoDB. Verified live 2026-11-22 (ADR-019 "Live evidence (3e-3)");
+  the phase closes once the MUC lockdown (3f) lands.
+
+Carry-forward from 3e-3:
+- Hidden-tab reconnects leave stream-management nick ghosts (`name-2`) until the old session times out. Resume the
+  XEP-0198 stream on reconnect, or shorten the resumption timeout (reconnect area, ADR-010).
+- Non-blocking review suggestions: make the unreachable `aborted` branch in `geo/roomAssigner.ts` a plain return; key Chat's
+  "Share your location" empty text on `cell === null` (one-frame flicker); export `browserTimers` from `api/` like `browserOnline`.
 
 ## Phase 4 — Room lifecycle & movement
 - [ ] `geo_room` process per active cell with idle shutdown under `geo_room_sup`

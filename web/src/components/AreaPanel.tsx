@@ -1,11 +1,13 @@
 import { useLayoutEffect, useRef } from 'react';
-import type { AreaState } from '../geo';
+import type { AreaState, AssignFailure, RoomAssignment } from '../geo';
 import { AREA_TEXT } from '../ui/text';
 
 export interface AreaPanelProps {
   area: AreaState;
+  assignment: RoomAssignment;
   onShare: () => void;
   onSwitchArea: () => void;
+  onRetryAssign: () => void;
   /** Shown with the denied message; only the dev build offers test locations. */
   devHint?: boolean;
 }
@@ -16,10 +18,27 @@ const SECONDARY =
   'rounded-lg border border-field bg-surface px-4 py-2 text-sm font-medium hover:bg-surface-sunken';
 
 /** The message, whether to offer an action, and which one. No state exposes anything but an area code. */
+type Action = 'share' | 'try-again' | 'switch' | 'retry-assign' | null;
+
+function describeFailure(reason: AssignFailure): { text: string; action: Action } {
+  switch (reason) {
+    case 'unavailable':
+      return { text: AREA_TEXT.locateUnavailable, action: 'retry-assign' };
+    case 'offline':
+      return { text: AREA_TEXT.locateOffline, action: 'retry-assign' };
+    case 'bad-response':
+      return { text: AREA_TEXT.locateBadResponse, action: 'retry-assign' };
+    // The IdentityNotice banner offers Start over; a retry here could not help.
+    case 'identity-invalid':
+      return { text: AREA_TEXT.locateIdentityInvalid, action: null };
+  }
+}
+
 function describe(
   area: AreaState,
+  assignment: RoomAssignment,
   devHint: boolean,
-): { text: string; action: 'share' | 'try-again' | 'switch' | null } {
+): { text: string; action: Action } {
   switch (area.status) {
     case 'checking':
       return { text: AREA_TEXT.checking, action: null };
@@ -41,6 +60,10 @@ function describe(
     case 'insecure-context':
       return { text: AREA_TEXT.insecure, action: null };
     case 'located':
+      if (assignment.status === 'failed') return describeFailure(assignment.reason);
+      if (assignment.status === 'assigning') {
+        return { text: AREA_TEXT.assigning(AREA_TEXT.areaLabel(area.cell.geohash)), action: null };
+      }
       return area.moved
         ? { text: AREA_TEXT.moved, action: 'switch' }
         : { text: '', action: null };
@@ -49,13 +72,15 @@ function describe(
 
 export function AreaPanel({
   area,
+  assignment,
   onShare,
   onSwitchArea,
+  onRetryAssign,
   devHint = false,
 }: AreaPanelProps): React.JSX.Element {
   const panelRef = useRef<HTMLElement>(null);
   const actionFocused = useRef(false);
-  const { text, action } = describe(area, devHint);
+  const { text, action } = describe(area, assignment, devHint);
   const hadAction = useRef(false);
 
   // When the focused action button goes away (e.g. after tapping "Share my location"), keep keyboard users here.
@@ -106,14 +131,18 @@ export function AreaPanel({
           <button
             type="button"
             className={action === 'switch' ? SECONDARY : PRIMARY}
-            onClick={action === 'switch' ? onSwitchArea : onShare}
+            onClick={
+              action === 'switch' ? onSwitchArea : action === 'retry-assign' ? onRetryAssign : onShare
+            }
             {...track}
           >
             {action === 'share'
               ? AREA_TEXT.share
               : action === 'try-again'
                 ? AREA_TEXT.tryAgain
-                : AREA_TEXT.switchArea}
+                : action === 'retry-assign'
+                  ? AREA_TEXT.retryAssign
+                  : AREA_TEXT.switchArea}
           </button>
         </div>
       )}

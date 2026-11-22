@@ -76,6 +76,67 @@ describe('architecture boundaries', { timeout: 60_000 }, () => {
       expect(await rulesFor(rel, code)).toContain('no-restricted-imports');
     });
 
+    it.each<[string, string, string]>([
+      ['a component', 'src/components/F.tsx', "import { createLocateApi } from '../api/locate';"],
+      ['state', 'src/state/f.ts', "import { createLocateApi } from '../api/locate';"],
+      ['a page', 'src/pages/F.tsx', "import { createLocateApi } from '../api/locate';"],
+      ['xmpp', 'src/xmpp/client.ts', "import { createLocateApi } from '../api/locate';"],
+      ['App.tsx', 'src/App.tsx', "import { createLocateApi } from './api/locate';"],
+    ])('importing api/locate from %s -> no-restricted-imports', async (_name, rel, code) => {
+      expect(await rulesFor(rel, code)).toContain('no-restricted-imports');
+    });
+
+    it('re-exporting api/locate from src/api/index.ts -> no-restricted-imports', async () => {
+      expect(await rulesFor('src/api/index.ts', "export { createLocateApi } from './locate';")).toContain(
+        'no-restricted-imports',
+      );
+    });
+
+    it('src/state/ importing geo -> no-restricted-imports', async () => {
+      expect(await rulesFor('src/state/f.ts', "import { useArea } from '../geo';")).toContain(
+        'no-restricted-imports',
+      );
+    });
+
+    it.each<[string, string, string]>([
+      ['xmpp client', 'src/xmpp/client.ts', "new WebSocket('ws://x');"],
+      ['a component', 'src/components/F.tsx', "new WebSocket('ws://x');"],
+      ['http.ts', 'src/api/http.ts', "new WebSocket('ws://x');"],
+    ])('WebSocket in %s -> no-restricted-globals', async (_name, rel, code) => {
+      expect(await rulesFor(rel, code)).toContain('no-restricted-globals');
+    });
+
+    it('window.WebSocket in state -> no-restricted-properties', async () => {
+      expect(await rulesFor('src/state/f.ts', "new window.WebSocket('ws://x');")).toContain(
+        'no-restricted-properties',
+      );
+    });
+
+    it('EventSource in geo -> no-restricted-globals', async () => {
+      expect(await rulesFor('src/geo/f.ts', "new EventSource('/x');")).toContain('no-restricted-globals');
+    });
+
+    it.each<[string, string]>([
+      ['src/components/F.tsx', "document.cookie = 'a=b';"],
+      ['src/components/F.tsx', "window.document.cookie;"],
+      ['src/api/deviceCredential.ts', "document.cookie = 'a=b';"],
+      ['src/api/deviceCredential.ts', "window.document.cookie;"],
+    ])('%s: %s -> no-restricted-properties', async (rel, code) => {
+      expect(await rulesFor(rel, code)).toContain('no-restricted-properties');
+    });
+
+    it.each<[string, string, string, string]>([
+      ['caches in http.ts', 'src/api/http.ts', "caches.open('x');", 'no-restricted-globals'],
+      ['self.caches in state', 'src/state/f.ts', "self.caches;", 'no-restricted-properties'],
+      ['cookieStore in a page', 'src/pages/F.tsx', "cookieStore.get('x');", 'no-restricted-globals'],
+    ])('%s -> %s', async (_name, rel, code, rule) => {
+      expect(await rulesFor(rel, code)).toContain(rule);
+    });
+
+    it('fetch in src/xmpp/strophe/ is still banned', async () => {
+      expect(await rulesFor('src/xmpp/strophe/s.ts', "fetch('/x');")).toContain('no-restricted-globals');
+    });
+
     it.each<[string]>([['src/api/http.ts'], ['src/state/identityController.ts'], ['src/pages/Welcome.tsx']])(
       'console.warn in %s -> no-console',
       async (rel) => {
@@ -101,6 +162,20 @@ describe('architecture boundaries', { timeout: 60_000 }, () => {
     it('allows a sibling import inside src/api', async () => {
       const ids = await rulesFor('src/api/index.ts', "export { createHttp } from './http';");
       expect(ids).toEqual([]);
+    });
+
+    it.each<[string, string, string]>([
+      ['geo', 'src/geo/f.ts', "import { createLocateApi } from '../api/locate'; void createLocateApi;"],
+      ['main.tsx', 'src/main.tsx', "import { createLocateApi } from './api/locate'; void createLocateApi;"],
+      ['a test', 'tests/x.test.ts', "import { createLocateApi } from '../src/api/locate'; void createLocateApi;"],
+    ])('allows importing api/locate from %s', async (_name, rel, code) => {
+      expect(await rulesFor(rel, code)).toEqual([]);
+    });
+
+    it('allows WebSocket and EventSource in src/xmpp/strophe/', async () => {
+      expect(
+        await rulesFor('src/xmpp/strophe/s.ts', "new WebSocket('ws://x'); new EventSource('/x');"),
+      ).toEqual([]);
     });
 
     it('allows fetch and localStorage in tests', async () => {

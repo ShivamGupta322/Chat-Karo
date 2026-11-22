@@ -51,7 +51,8 @@ const defaultTimers: Timers = {
   },
 };
 
-const defaultOnline: OnlineSource = {
+/** window online event + navigator.onLine; shared with the room assigner. */
+export const browserOnline: OnlineSource = {
   isOnline: () => typeof navigator === 'undefined' || navigator.onLine,
   subscribe: (cb) => {
     window.addEventListener('online', cb);
@@ -76,7 +77,7 @@ export function createTokenManager(o: {
 }): TokenManager {
   const now = o.now ?? ((): number => Date.now());
   const timers = o.timers ?? defaultTimers;
-  const online = o.online ?? defaultOnline;
+  const online = o.online ?? browserOnline;
   const fraction = o.renewAtFraction ?? 0.8;
   const minValidityMs = o.minValidityMs ?? 60_000;
   const backoffBaseMs = o.backoffBaseMs ?? 5_000;

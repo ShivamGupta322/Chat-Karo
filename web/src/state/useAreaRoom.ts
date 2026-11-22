@@ -29,7 +29,7 @@ export function planRoomActions(input: {
 }
 
 /**
- * Keeps the client in the one desired room. TEMPORARY (Phase 3): replaced when geo_service assigns rooms.
+ * Keeps the client in the one desired room: the room geo_service assigned (ADR-019 D3), or none.
  * The effect re-reads the stores so a StrictMode re-run or a quick re-render never joins twice.
  */
 export function useAreaRoom(

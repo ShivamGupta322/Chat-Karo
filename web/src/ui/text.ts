@@ -154,4 +154,12 @@ export const AREA_TEXT = {
   rejoin: 'Join again',
   emptyNoArea: 'Share your location to chat with people nearby.',
   emptyJoining: 'Getting your area chat ready…',
+  assigning: (label: string): string => `Finding the chat for ${label}…`,
+  locateUnavailable: "Nearby can't reach your area chat right now. We'll keep trying.",
+  locateOffline: "You're offline. We'll find your area chat when you're back online.",
+  locateIdentityInvalid:
+    "Nearby can't find your area chat because it can't confirm your name. To chat here, start over with a new name.",
+  locateBadResponse: 'Something went wrong while finding your area chat.',
+  retryAssign: 'Find my area chat',
+  emptyUnassigned: 'Your area chat will show up here.',
 } as const;

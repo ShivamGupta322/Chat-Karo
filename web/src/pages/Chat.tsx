@@ -6,7 +6,7 @@ import { Composer } from "../components/Composer";
 import { HistoryStatus } from "../components/HistoryStatus";
 import { MessageList } from "../components/MessageList";
 import { OccupantList } from "../components/OccupantList";
-import { DevLocationPicker, roomJidForCell, useArea } from "../geo";
+import { DevLocationPicker, useArea, useRoomAssignment } from "../geo";
 import { useRoomStore } from "../state/room";
 import { useSessionStore } from "../state/session";
 import { useAreaRoom } from "../state/useAreaRoom";
@@ -19,13 +19,11 @@ import {
 import { useXmppClient } from "../xmpp";
 
 export function Chat({
-  mucDomain,
   mapTileUrl,
   nickname,
   onSignOut,
   banner,
 }: {
-  mucDomain: string;
   mapTileUrl: string | null;
   /** The profile nickname: shown in the header and used as the MUC nick. */
   nickname: string;
@@ -37,16 +35,18 @@ export function Chat({
   const room = useRoomStore();
   const area = useArea();
 
-  // TEMPORARY (Phase 3): the client picks the room from the cell; geo_service /api/locate will replace this.
+  // geo_service picks the room for the committed cell (ADR-019 D3); the previous room is kept until it answers.
   const cell = area.state.status === "located" ? area.state.cell : null;
-  // A string: useAreaRoom's effect deps compare it by value, so it is stable per cell.
-  const desiredRoomJid = cell === null ? null : roomJidForCell(cell, mucDomain);
+  const { assignment, retry: retryAssign } = useRoomAssignment(cell);
+  // A string: useAreaRoom's effect deps compare it by value, so it is stable per room.
+  const desiredRoomJid = assignment.room?.jid ?? null;
   const { retry } = useAreaRoom(client, desiredRoomJid, nickname);
 
   // Never show another room's data: until the store has switched to the desired room, show nothing of it.
   const current = room.roomJid !== null && room.roomJid === desiredRoomJid;
   const joined = current && room.status === "joined";
-  const label = cell === null ? "" : AREA_TEXT.areaLabel(cell.geohash);
+  // The room's own cell, so the label stays correct while a switch is pending.
+  const label = assignment.room ? AREA_TEXT.areaLabel(assignment.room.cell) : "";
   const reconnecting = connection.status === "reconnecting";
 
   let statusLine: React.ReactNode = null;
@@ -87,13 +87,17 @@ export function Chat({
     ? room.history.loading
       ? HISTORY_TEXT.emptyLoading
       : "No messages yet. Say hello!"
-    : desiredRoomJid === null
+    : assignment.status === "none"
       ? AREA_TEXT.emptyNoArea
-      : current && (room.status === "failed" || room.status === "left")
-        ? ""
-        : current && room.status === "reconnecting"
-          ? CONNECTION_TEXT.roomReconnectingEmpty
-          : AREA_TEXT.emptyJoining;
+      : assignment.status === "assigning" && assignment.room === null
+        ? AREA_TEXT.emptyJoining
+        : assignment.status === "failed"
+          ? AREA_TEXT.emptyUnassigned
+          : current && (room.status === "failed" || room.status === "left")
+            ? ""
+            : current && room.status === "reconnecting"
+              ? CONNECTION_TEXT.roomReconnectingEmpty
+              : AREA_TEXT.emptyJoining;
 
   return (
     <div className="flex min-h-dvh flex-col md:h-dvh">
@@ -111,6 +115,8 @@ export function Chat({
         <div className="grid min-w-0 gap-3 md:flex md:min-h-0 md:flex-col">
           <AreaPanel
             area={area.state}
+            assignment={assignment}
+            onRetryAssign={retryAssign}
             onShare={area.start}
             onSwitchArea={area.commitMove}
             devHint={import.meta.env.DEV}

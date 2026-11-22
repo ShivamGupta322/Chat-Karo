@@ -33,6 +33,24 @@ export interface Http {
   postJson(path: `/${string}`, body: unknown, opts: PostOptions): Promise<ApiResult<HttpResponse>>;
 }
 
+const BAD: ApiError = { kind: 'bad-response' };
+const CODE_RE = /^[a-z_]{1,64}$/;
+
+export function isRecord(v: unknown): v is Record<string, unknown> {
+  return typeof v === 'object' && v !== null && !Array.isArray(v);
+}
+
+/** null when the response has the expected success status; otherwise the error to return. */
+export function statusError(res: HttpResponse, expected: number): ApiError | null {
+  if (res.status === expected) return null;
+  if (res.status >= 200 && res.status < 300) return BAD;
+  const code =
+    isRecord(res.body) && typeof res.body.error === 'string' && CODE_RE.test(res.body.error)
+      ? res.body.error
+      : null;
+  return { kind: 'http', status: res.status, code, retryAfterMs: res.retryAfterMs };
+}
+
 const MAX_BODY_CHARS = 65_536;
 const MAX_RETRY_AFTER_MS = 300_000;
 

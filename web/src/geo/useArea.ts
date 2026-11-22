@@ -1,13 +1,7 @@
 import { useCallback, useMemo, useState } from 'react';
-import { cellFor, type Cell, type CellPrecision } from './cell';
+import { cellFor, type Cell, type CellPrecision, type GeoPoint } from './cell';
 import type { GeohashError } from './geohash';
 import { useLocation, type LocationState } from './useLocation';
-
-/** A raw point. Only the dev picker creates one, and it is dropped as soon as it has been turned into a Cell. */
-export interface GeoPoint {
-  readonly lat: number;
-  readonly lng: number;
-}
 
 export interface DevOverride {
   readonly active: boolean;
