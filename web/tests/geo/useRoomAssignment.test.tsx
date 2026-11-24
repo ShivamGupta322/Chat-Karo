@@ -17,6 +17,7 @@ function fakeAssigner(): RoomAssigner & { assign: ReturnType<typeof vi.fn> } {
   return {
     assign: vi.fn(),
     retry: vi.fn(),
+    refresh: vi.fn(() => Promise.resolve('superseded' as const)),
     getState: () => NONE,
     subscribe: () => () => undefined,
     dispose: vi.fn(),

@@ -17,6 +17,7 @@
     session/0,
     parse_jwt_secret/1,
     parse_xmpp_domain/1,
+    parse_room_owner/1,
     muc_domain/1,
     parse_admin_url/1,
     parse_admin_user/1,
@@ -46,11 +47,17 @@
     | mongo_pool_size.
 
 -type session_key() ::
-    jwt_secret | xmpp_domain | mim_admin_url | mim_admin_user | mim_admin_password.
+    jwt_secret
+    | xmpp_domain
+    | mim_admin_url
+    | mim_admin_user
+    | mim_admin_password
+    | xmpp_room_owner.
 -type session_cfg() :: #{
     jwt_secret := binary(),
     xmpp_domain := binary(),
     muc_domain := binary(),
+    room_owner := binary(),
     admin := geo_xmpp_admin:admin()
 }.
 
@@ -305,8 +312,8 @@ parse_pool_size(Value) ->
 
 %%% Session (JWT + MongooseIM admin API) ------------------------------------------------
 
-%% Validation order: jwt_secret, xmpp_domain, mim_admin_url, mim_admin_user, mim_admin_password.
-%% Errors name the key only, never the value (these are secrets).
+%% Validation order: jwt_secret, xmpp_domain, mim_admin_url, mim_admin_user, mim_admin_password,
+%% xmpp_room_owner. Errors name the key only, never the value (these are secrets).
 -spec session() -> {ok, session_cfg()} | {error, {bad_config, session_key()}}.
 session() ->
     Get = fun(Key) -> application:get_env(geo_service, Key, undefined) end,
@@ -317,11 +324,13 @@ session() ->
         {ok, User} ?= bad(mim_admin_user, parse_admin_user(Get(mim_admin_user))),
         {ok, Password} ?= bad(mim_admin_password, parse_admin_password(Get(mim_admin_password))),
         true ?= byte_size(Domain) =< 249 orelse {error, {bad_config, xmpp_domain}},
+        {ok, Owner} ?= bad(xmpp_room_owner, parse_room_owner(Get(xmpp_room_owner))),
         Basic = base64:encode(<<User/binary, ":", Password/binary>>),
         {ok, #{
             jwt_secret => Secret,
             xmpp_domain => Domain,
             muc_domain => muc_domain(Domain),
+            room_owner => Owner,
             admin => #{
                 url => Url,
                 authorization => <<"Basic ", Basic/binary>>,
@@ -365,6 +374,31 @@ parse_xmpp_domain(Value) ->
         error ->
             error
     end.
+
+%% The room-owner account's localpart (ADR-020): ^[a-z][a-z0-9-]{2,31}$, and never the shape of a
+%% pseudonymous identity (u + 32 lowercase hex), so a user can't be mistaken for the owner.
+-spec parse_room_owner(term()) -> {ok, binary()} | error.
+parse_room_owner(Value) ->
+    case text(Value) of
+        {ok, <<First, _/binary>> = Bin} when
+            First >= $a, First =< $z, byte_size(Bin) >= 3, byte_size(Bin) =< 32
+        ->
+            case all_bytes(Bin, fun owner_char/1) andalso not is_user_sub(Bin) of
+                true -> {ok, Bin};
+                false -> error
+            end;
+        _ ->
+            error
+    end.
+
+-spec is_user_sub(binary()) -> boolean().
+is_user_sub(<<"u", Hex:32/binary>>) ->
+    all_bytes(Hex, fun(C) -> is_digit(C) orelse (C >= $a andalso C =< $f) end);
+is_user_sub(_) ->
+    false.
+
+-spec owner_char(byte()) -> boolean().
+owner_char(C) -> (C >= $a andalso C =< $z) orelse is_digit(C) orelse C =:= $-.
 
 %% An http:// URL with a host and a non-empty path; no credentials, query or fragment (the
 %% admin credentials travel in the Authorization header). Returned as a string for httpc.

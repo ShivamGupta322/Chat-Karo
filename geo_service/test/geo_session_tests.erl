@@ -108,6 +108,7 @@ parse_total_test_() ->
     jwt_secret => ?SECRET,
     xmpp_domain => ?DOMAIN,
     muc_domain => <<"muc.chaterl.localhost">>,
+    room_owner => <<"nearby-rooms">>,
     admin => #{
         url => "http://127.0.0.1:1/api/graphql",
         authorization => <<"Basic x">>,

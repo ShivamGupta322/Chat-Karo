@@ -2,7 +2,6 @@ import { xmlEl } from './xml';
 
 export const NS_MUC = 'http://jabber.org/protocol/muc';
 export const NS_MUC_USER = 'http://jabber.org/protocol/muc#user';
-export const NS_MUC_OWNER = 'http://jabber.org/protocol/muc#owner';
 export const NS_STANZAS = 'urn:ietf:params:xml:ns:xmpp-stanzas';
 export const NS_DELAY = 'urn:xmpp:delay';
 export const NS_SID = 'urn:xmpp:sid:0';

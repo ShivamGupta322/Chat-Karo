@@ -17,9 +17,24 @@ child_spec(#{ip := Ip, port := Port}, SessionCfg) ->
     ranch:child_spec(geo_http, ranch_tcp, TransOpts, cowboy_clear, ProtoOpts).
 
 -spec dispatch(geo_config:session_cfg()) -> cowboy_router:dispatch_rules().
-dispatch(#{jwt_secret := JwtSecret, muc_domain := MucDomain} = SessionCfg) ->
-    %% Least privilege: the locate handler gets the JWT key and the MUC domain, not the admin credentials.
-    LocateCfg = #{jwt_secret => JwtSecret, muc_domain => MucDomain},
+dispatch(
+    #{
+        jwt_secret := JwtSecret,
+        muc_domain := MucDomain,
+        xmpp_domain := XmppDomain,
+        room_owner := RoomOwner,
+        admin := Admin
+    } = SessionCfg
+) ->
+    %% The locate handler needs the admin API to grant room membership (ADR-020); it still has no
+    %% access to profiles or the session/renew configuration.
+    LocateCfg = #{
+        jwt_secret => JwtSecret,
+        muc_domain => MucDomain,
+        xmpp_domain => XmppDomain,
+        room_owner => RoomOwner,
+        admin => Admin
+    },
     cowboy_router:compile([
         {'_', [
             {"/api/health", geo_http_health, []},

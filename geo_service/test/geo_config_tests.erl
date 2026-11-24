@@ -388,7 +388,9 @@ base_mongo(Overrides) ->
 
 %%% session() -------------------------------------------------------------------------------
 
--define(SESSION_KEYS, [jwt_secret, xmpp_domain, mim_admin_url, mim_admin_user, mim_admin_password]).
+-define(SESSION_KEYS, [
+    jwt_secret, xmpp_domain, mim_admin_url, mim_admin_user, mim_admin_password, xmpp_room_owner
+]).
 -define(GOOD_SECRET, "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef").
 
 jwt_secret_accepts_test_() ->
@@ -468,6 +470,38 @@ admin_user_and_password_test_() ->
         ?_assertEqual(error, geo_config:parse_admin_password("a\r"))
     ].
 
+room_owner_accepts_test_() ->
+    [
+        ?_assertEqual({ok, <<"nearby-rooms">>}, geo_config:parse_room_owner("nearby-rooms")),
+        ?_assertEqual({ok, <<"nearby-rooms">>}, geo_config:parse_room_owner(<<"nearby-rooms">>)),
+        ?_assertEqual({ok, <<"abc">>}, geo_config:parse_room_owner("abc")),
+        ?_assertMatch({ok, _}, geo_config:parse_room_owner(lists:duplicate(32, $a))),
+        %% u + 31 hex is too short for the pseudonymous shape; u + 31 non-hex is not hex
+        ?_assertMatch({ok, _}, geo_config:parse_room_owner("u" ++ lists:duplicate(31, $a))),
+        ?_assertMatch({ok, _}, geo_config:parse_room_owner("u" ++ lists:duplicate(31, $g)))
+    ].
+
+room_owner_rejects_test_() ->
+    [
+        ?_assertEqual(error, geo_config:parse_room_owner(In))
+     || In <- [
+            "",
+            "Nearby",
+            "n",
+            "ne",
+            lists:duplicate(33, $a),
+            "u0123456789abcdef0123456789abcdef",
+            "a b",
+            "1abc",
+            "-abc",
+            "ab_c",
+            "ab@c",
+            undefined,
+            123,
+            [a, b]
+        ]
+    ].
+
 session_test_() ->
     {foreach, fun save_session_env/0, fun restore_env/1, [
         fun(_) ->
@@ -478,6 +512,7 @@ session_test_() ->
                         jwt_secret := <<?GOOD_SECRET>>,
                         xmpp_domain := <<"chaterl.localhost">>,
                         muc_domain := <<"muc.chaterl.localhost">>,
+                        room_owner := <<"nearby-rooms">>,
                         admin := #{
                             url := "http://mongooseim:5551/api/graphql",
                             authorization := <<"Basic ", _/binary>>,
@@ -505,7 +540,9 @@ session_test_() ->
                 {xmpp_domain, ""},
                 {mim_admin_url, "https://mongooseim:5551/api/graphql"},
                 {mim_admin_user, ""},
-                {mim_admin_password, ""}
+                {mim_admin_password, ""},
+                {xmpp_room_owner, ""},
+                {xmpp_room_owner, "Nearby"}
             ]
         ] ++
             [
@@ -518,6 +555,24 @@ session_test_() ->
                     base_session(#{}),
                     unset(xmpp_domain),
                     ?_assertEqual({error, {bad_config, xmpp_domain}}, geo_config:session())
+                end,
+                fun(_) ->
+                    base_session(#{}),
+                    unset(xmpp_room_owner),
+                    ?_assertEqual({error, {bad_config, xmpp_room_owner}}, geo_config:session())
+                end,
+                %% The room owner is validated last.
+                fun(_) ->
+                    base_session(#{xmpp_room_owner => "Bad Owner", mim_admin_user => ""}),
+                    ?_assertEqual({error, {bad_config, mim_admin_user}}, geo_config:session())
+                end,
+                fun(_) ->
+                    base_session(#{xmpp_room_owner => ?PW_SENTINEL ++ "!"}),
+                    Result = geo_config:session(),
+                    [
+                        ?_assertEqual({error, {bad_config, xmpp_room_owner}}, Result),
+                        ?_assertEqual(nomatch, string:find(printed(Result), ?PW_SENTINEL))
+                    ]
                 end,
                 %% No error ever contains the offending value.
                 fun(_) ->
@@ -569,7 +624,8 @@ base_session(Overrides) ->
         xmpp_domain => "chaterl.localhost",
         mim_admin_url => "http://mongooseim:5551/api/graphql",
         mim_admin_user => "admin",
-        mim_admin_password => "adm1n pw"
+        mim_admin_password => "adm1n pw",
+        xmpp_room_owner => "nearby-rooms"
     },
     maps:foreach(fun set/2, maps:merge(Base, Overrides)).
 

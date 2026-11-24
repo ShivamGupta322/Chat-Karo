@@ -1,6 +1,6 @@
 import { createContext, useContext, useEffect, useSyncExternalStore, type ReactNode } from 'react';
 import type { Cell } from './cell';
-import type { RoomAssigner, RoomAssignment } from './roomAssigner';
+import type { RefreshOutcome, RoomAssigner, RoomAssignment } from './roomAssigner';
 
 const RoomAssignerContext = createContext<RoomAssigner | null>(null);
 
@@ -18,6 +18,7 @@ export function RoomAssignerProvider({
 export function useRoomAssignment(cell: Cell | null): {
   assignment: RoomAssignment;
   retry: () => void;
+  refresh: () => Promise<RefreshOutcome>;
 } {
   const assigner = useContext(RoomAssignerContext);
   if (assigner === null) throw new Error('useRoomAssignment must be used inside a RoomAssignerProvider');
@@ -34,5 +35,5 @@ export function useRoomAssignment(cell: Cell | null): {
   );
 
   const assignment = useSyncExternalStore(assigner.subscribe, assigner.getState);
-  return { assignment, retry: assigner.retry };
+  return { assignment, retry: assigner.retry, refresh: assigner.refresh };
 }

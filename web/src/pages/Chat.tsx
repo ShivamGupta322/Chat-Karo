@@ -9,6 +9,7 @@ import { OccupantList } from "../components/OccupantList";
 import { DevLocationPicker, useArea, useRoomAssignment } from "../geo";
 import { useRoomStore } from "../state/room";
 import { useSessionStore } from "../state/session";
+import { ACCESS_FAILURES, useAccessRecovery } from "../state/useAccessRecovery";
 import { useAreaRoom } from "../state/useAreaRoom";
 import {
   AREA_TEXT,
@@ -37,10 +38,22 @@ export function Chat({
 
   // geo_service picks the room for the committed cell (ADR-019 D3); the previous room is kept until it answers.
   const cell = area.state.status === "located" ? area.state.cell : null;
-  const { assignment, retry: retryAssign } = useRoomAssignment(cell);
+  const {
+    assignment,
+    retry: retryAssign,
+    refresh,
+  } = useRoomAssignment(cell);
   // A string: useAreaRoom's effect deps compare it by value, so it is stable per room.
   const desiredRoomJid = assignment.room?.jid ?? null;
   const { retry } = useAreaRoom(client, desiredRoomJid, nickname);
+  // A refused join (e.g. after a MongooseIM restart) locates once more and rejoins, once (ADR-020).
+  const { phase, recover } = useAccessRecovery({
+    client,
+    desired: desiredRoomJid,
+    nick: nickname,
+    refresh,
+  });
+  const recovering = phase === "recovering";
 
   // Never show another room's data: until the store has switched to the desired room, show nothing of it.
   const current = room.roomJid !== null && room.roomJid === desiredRoomJid;
@@ -48,9 +61,17 @@ export function Chat({
   // The room's own cell, so the label stays correct while a switch is pending.
   const label = assignment.room ? AREA_TEXT.areaLabel(assignment.room.cell) : "";
   const reconnecting = connection.status === "reconnecting";
+  const accessDenied =
+    current &&
+    room.status === "failed" &&
+    room.failure !== null &&
+    ACCESS_FAILURES.has(room.failure.reason) &&
+    phase === "exhausted";
 
   let statusLine: React.ReactNode = null;
-  if (desiredRoomJid !== null && !current) {
+  if (recovering) {
+    statusLine = AREA_TEXT.joining(label);
+  } else if (desiredRoomJid !== null && !current) {
     statusLine = reconnecting
       ? CONNECTION_TEXT.roomReconnecting
       : AREA_TEXT.joining(label);
@@ -64,13 +85,16 @@ export function Chat({
         </>
       );
     } else if (room.status === "failed" && room.failure) {
-      statusLine = describeJoinFailure(room.failure.reason);
+      statusLine = accessDenied
+        ? AREA_TEXT.accessDenied
+        : describeJoinFailure(room.failure.reason);
     } else if (room.status === "left") statusLine = AREA_TEXT.left;
     else if (room.status === "reconnecting")
       statusLine = CONNECTION_TEXT.roomReconnecting;
   }
 
-  const showRejoin = current && (room.status === "failed" || room.status === "left");
+  const showRejoin =
+    !recovering && current && (room.status === "failed" || room.status === "left");
   const statusRef = useRef<HTMLParagraphElement>(null);
   const rejoinFocused = useRef(false);
   const hadRejoin = useRef(false);
@@ -135,7 +159,7 @@ export function Chat({
             {showRejoin && (
               <button
                 type="button"
-                onClick={retry}
+                onClick={accessDenied ? recover : retry}
                 onFocus={() => {
                   rejoinFocused.current = true;
                 }}
@@ -145,7 +169,7 @@ export function Chat({
                 }}
                 className="rounded-lg border border-field bg-surface px-3 py-1 text-sm font-medium text-ink hover:bg-surface-sunken"
               >
-                {AREA_TEXT.rejoin}
+                {accessDenied ? AREA_TEXT.accessRetry : AREA_TEXT.rejoin}
               </button>
             )}
           </div>

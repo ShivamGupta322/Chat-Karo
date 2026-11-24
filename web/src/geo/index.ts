@@ -5,5 +5,11 @@ export type { AreaController, AreaState, DevOverride } from './useArea';
 export { DevLocationPicker } from './DevLocationPicker';
 export { RoomAssignerProvider, useRoomAssignment } from './RoomAssignment';
 export { createRoomAssigner } from './roomAssigner';
-export type { AssignFailure, AssignedRoom, RoomAssigner, RoomAssignment } from './roomAssigner';
+export type {
+  AssignFailure,
+  AssignedRoom,
+  RefreshOutcome,
+  RoomAssigner,
+  RoomAssignment,
+} from './roomAssigner';
 export type { Cell, CellPrecision } from './cell';

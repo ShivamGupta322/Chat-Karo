@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# Phase 1 dev seed: two test users and one MUC room, created via mongooseimctl (admin GraphQL CLI).
+# Dev seed: two test users, the room-owner account and one members-only MUC room (lobby), created via
+# mongooseimctl (admin GraphQL CLI). Re-run after restarting MongooseIM (ADR-020).
 # Run from the repo root once the stack is healthy:
 #   bash infra/mongooseim/dev-seed.sh
 # Safe to re-run: "already registered" results are tolerated; any other failure stops the script.
@@ -43,7 +44,29 @@ for u in alice bob; do
   run_tolerant account registerUser --domain "$XMPP_DOMAIN" --username "$u" --password "$DEV_USER_PASSWORD"
 done
 
-echo "== creating room lobby@$MUC"
-run_tolerant muc createInstantRoom --room "lobby@$MUC" --owner "alice@$XMPP_DOMAIN" --nick alice
+OWNER="${XMPP_ROOM_OWNER:-nearby-rooms}"
+# Same constant as geo_xmpp_admin:room_config/0 (ADR-020): members-only, hidden, hardened.
+ROOM_CONFIG='{"public":false,"publicList":false,"persistent":true,"membersOnly":true,"anonymous":true,"allowPrivateMessages":false,"allowQueryUsers":false,"allowChangeSubject":false,"allowUserInvites":false,"mayGetMemberList":[]}'
+
+# Only the room-owner account may create rooms (access_create). Its password is random, never printed
+# and never needed again: geo_service creates rooms through the admin API, not by logging in.
+echo "== registering room owner $OWNER@$XMPP_DOMAIN"
+OWNER_PASSWORD=$(head -c 24 /dev/urandom | base64 | tr -d '/+=')
+run_tolerant account registerUser --domain "$XMPP_DOMAIN" --username "$OWNER" --password "$OWNER_PASSWORD"
+unset OWNER_PASSWORD
+
+echo "== creating room lobby@$MUC (members-only, owned by $OWNER)"
+run_tolerant muc createInstantRoom --room "lobby@$MUC" --owner "$OWNER@$XMPP_DOMAIN/geo_service" --nick Nearby
+echo "== applying the room configuration"
+run_tolerant muc changeRoomConfiguration --room "lobby@$MUC" --config "$ROOM_CONFIG"
+# The owner joined as a ghost occupant (no session); let it leave.
+run_tolerant muc exitRoom --room "lobby@$MUC" --user "$OWNER@$XMPP_DOMAIN/geo_service" --nick Nearby
+
+for u in alice bob; do
+  echo "== making $u a member of lobby@$MUC"
+  run_tolerant muc setUserAffiliation --room "lobby@$MUC" --user "$u@$XMPP_DOMAIN" --affiliation MEMBER
+done
 
 echo "Done. Log in as alice or bob with DEV_USER_PASSWORD and join lobby@$MUC"
+echo "Re-run this script after restarting MongooseIM: it reloads the lobby room (members-only rooms are"
+echo "not loaded at startup, and only the room owner may load them)."

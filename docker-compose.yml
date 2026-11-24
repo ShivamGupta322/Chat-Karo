@@ -48,6 +48,7 @@ services:
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
       MONGOOSEIM_ADMIN_USER: ${MONGOOSEIM_ADMIN_USER}
       MONGOOSEIM_ADMIN_PASSWORD: ${MONGOOSEIM_ADMIN_PASSWORD}
+      XMPP_ROOM_OWNER: ${XMPP_ROOM_OWNER:-nearby-rooms}
       JOIN_CLUSTER: "false"        # single node; skip the image's auto-clustering logic
     volumes:
       - ./infra/mongooseim/mongooseim.toml.tmpl:/templates/mongooseim.toml.tmpl:ro
@@ -91,6 +92,7 @@ services:
       MONGOOSEIM_ADMIN_URL: ${MONGOOSEIM_ADMIN_URL:-http://mongooseim:5551/api/graphql}
       MONGOOSEIM_ADMIN_USER: ${MONGOOSEIM_ADMIN_USER}
       MONGOOSEIM_ADMIN_PASSWORD: ${MONGOOSEIM_ADMIN_PASSWORD}
+      XMPP_ROOM_OWNER: ${XMPP_ROOM_OWNER:-nearby-rooms}
     # No depends_on mongooseim on purpose: /api/ready does not depend on the admin API, and a
     # MongooseIM outage only makes POST /api/session answer 503. geo_service starts without it.
     depends_on:

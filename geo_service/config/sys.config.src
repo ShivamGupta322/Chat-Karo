@@ -15,6 +15,7 @@
         {mongo_pool_size, "${MONGO_POOL_SIZE}"},
         {jwt_secret, "${JWT_SECRET}"},
         {xmpp_domain, "${XMPP_DOMAIN}"},
+        {xmpp_room_owner, "${XMPP_ROOM_OWNER}"},
         {mim_admin_url, "${MONGOOSEIM_ADMIN_URL}"},
         {mim_admin_user, "${MONGOOSEIM_ADMIN_USER}"},
         {mim_admin_password, "${MONGOOSEIM_ADMIN_PASSWORD}"}

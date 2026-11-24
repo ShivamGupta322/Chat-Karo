@@ -66,6 +66,7 @@ describe('Chat page room status', () => {
     const assigner: RoomAssigner = {
       assign: () => undefined,
       retry: () => undefined,
+      refresh: () => Promise.resolve('superseded'),
       getState: () => assigned,
       subscribe: () => () => undefined,
       dispose: () => undefined,

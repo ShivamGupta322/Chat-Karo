@@ -645,6 +645,7 @@ start_app(Hosts, FakePort) ->
             {mongo_pool_size, ""},
             {jwt_secret, ?JWT_SECRET},
             {xmpp_domain, ?DOMAIN},
+            {xmpp_room_owner, "nearby-rooms"},
             {mim_admin_url, "http://127.0.0.1:" ++ integer_to_list(FakePort) ++ "/api/graphql"},
             {mim_admin_user, ?ADMIN_USER},
             {mim_admin_password, ?ADMIN_PASSWORD}

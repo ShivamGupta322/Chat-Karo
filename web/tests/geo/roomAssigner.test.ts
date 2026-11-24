@@ -413,3 +413,115 @@ describe('createRoomAssigner', () => {
     for (const s of seen) expect(JSON.stringify(s)).not.toMatch(/\d+\.\d{3,}|"(lat|lng)"/);
   });
 });
+
+describe('createRoomAssigner refresh()', () => {
+  const assignedA = {
+    status: 'assigned',
+    cell: A,
+    room: { jid: `g7_u4pruyd@${MUC}`, cell: 'u4pruyd' },
+  } as const;
+
+  async function assigned(): Promise<ReturnType<typeof setup>> {
+    const ctx = setup();
+    ctx.assigner.assign(A);
+    ctx.reqs[0]?.resolve(answer('u4pruyd'));
+    await flush();
+    expect(ctx.assigner.getState()).toEqual(assignedA);
+    return ctx;
+  }
+
+  it('while assigned: one locate, assigning with the room kept, then a new assigned object', async () => {
+    const ctx = await assigned();
+    const before = ctx.assigner.getState();
+    const outcome = ctx.assigner.refresh();
+    expect(ctx.reqs).toHaveLength(2);
+    expect(ctx.reqs[1]?.point).toEqual(CENTRE_A);
+    expect(ctx.assigner.getState()).toEqual({ status: 'assigning', cell: A, room: assignedA.room });
+    ctx.reqs[1]?.resolve(answer('u4pruyd'));
+    await expect(outcome).resolves.toBe('assigned');
+    const after = ctx.assigner.getState();
+    expect(after).toEqual(assignedA);
+    // Same jid, new object: subscribers see a change.
+    expect(after).not.toBe(before);
+  });
+
+  it('with no target it is superseded at once and sends nothing', async () => {
+    const { assigner, reqs } = setup();
+    await expect(assigner.refresh()).resolves.toBe('superseded');
+    expect(reqs).toHaveLength(0);
+  });
+
+  it('after assign(null) it is superseded at once', async () => {
+    const ctx = await assigned();
+    ctx.assigner.assign(null);
+    await expect(ctx.assigner.refresh()).resolves.toBe('superseded');
+    expect(ctx.reqs).toHaveLength(1);
+  });
+
+  it('assign(other cell) during a refresh supersedes it and aborts its request', async () => {
+    const ctx = await assigned();
+    const outcome = ctx.assigner.refresh();
+    ctx.assigner.assign(B);
+    await expect(outcome).resolves.toBe('superseded');
+    expect(ctx.reqs[1]?.signal.aborted).toBe(true);
+    expect(ctx.reqs).toHaveLength(3);
+  });
+
+  it('a second refresh supersedes the first', async () => {
+    const ctx = await assigned();
+    const first = ctx.assigner.refresh();
+    const second = ctx.assigner.refresh();
+    await expect(first).resolves.toBe('superseded');
+    expect(ctx.reqs[1]?.signal.aborted).toBe(true);
+    ctx.reqs[2]?.resolve(answer('u4pruyd'));
+    await expect(second).resolves.toBe('assigned');
+  });
+
+  it('an unavailable answer resolves failed and the automatic retry still fires', async () => {
+    const ctx = await assigned();
+    const outcome = ctx.assigner.refresh();
+    ctx.reqs[1]?.resolve(failure({ kind: 'unavailable', retryAfterMs: null }));
+    await expect(outcome).resolves.toBe('failed');
+    expect(ctx.assigner.getState()).toEqual({
+      status: 'failed',
+      cell: A,
+      reason: 'unavailable',
+      room: null,
+    });
+    expect(ctx.timers.pending).toHaveLength(1);
+    ctx.timers.fireNext();
+    expect(ctx.reqs).toHaveLength(3);
+    ctx.reqs[2]?.resolve(answer('u4pruyd'));
+    await flush();
+    expect(ctx.assigner.getState()).toEqual(assignedA);
+  });
+
+  it('in failed it behaves as a retry', async () => {
+    const ctx = setup();
+    ctx.assigner.assign(A);
+    ctx.reqs[0]?.resolve(failure({ kind: 'bad-response' }));
+    await flush();
+    const outcome = ctx.assigner.refresh();
+    expect(ctx.reqs).toHaveLength(2);
+    expect(ctx.assigner.getState()).toEqual({ status: 'assigning', cell: A, room: null });
+    ctx.reqs[1]?.resolve(answer('u4pruyd'));
+    await expect(outcome).resolves.toBe('assigned');
+  });
+
+  it('offline resolves failed without a request', async () => {
+    const ctx = await assigned();
+    ctx.net.online = false;
+    await expect(ctx.assigner.refresh()).resolves.toBe('failed');
+    expect(ctx.reqs).toHaveLength(1);
+    expect(ctx.assigner.getState()).toMatchObject({ status: 'failed', reason: 'offline' });
+  });
+
+  it('dispose() during a refresh supersedes it; refresh after dispose is superseded', async () => {
+    const ctx = await assigned();
+    const outcome = ctx.assigner.refresh();
+    ctx.assigner.dispose();
+    await expect(outcome).resolves.toBe('superseded');
+    await expect(ctx.assigner.refresh()).resolves.toBe('superseded');
+    expect(ctx.reqs).toHaveLength(2);
+  });
+});

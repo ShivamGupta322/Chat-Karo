@@ -7,7 +7,7 @@ TEMPLATE=/templates/mongooseim.toml.tmpl
 OUT=/member/mongooseim.toml
 
 VARS=(XMPP_DOMAIN POSTGRES_HOST POSTGRES_DB POSTGRES_USER POSTGRES_PASSWORD
-      MONGOOSEIM_ADMIN_USER MONGOOSEIM_ADMIN_PASSWORD)
+      MONGOOSEIM_ADMIN_USER MONGOOSEIM_ADMIN_PASSWORD XMPP_ROOM_OWNER)
 
 # Escape characters that are special in a sed replacement (we use | as the delimiter).
 escape() { printf '%s' "$1" | sed -e 's/[\\|&]/\\&/g'; }

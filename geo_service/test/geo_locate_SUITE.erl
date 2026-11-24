@@ -29,9 +29,17 @@
     validation/1,
     bad_charset_415/1,
     mongo_unavailable_503/1,
+    grants_membership/1,
+    same_cell_one_set_member/1,
+    admin_unavailable_503/1,
+    admin_unauthorized_500/1,
+    configure_mismatch_500/1,
+    slow_room_503/1,
+    non_pseudonymous_sub_401/1,
     crash_in_cell_for/1,
     crash_function_clause_with_args/1,
     crash_case_clause_after_store/1,
+    crash_in_room_access/1,
     logs_contain_no_coordinates/1
 ]).
 %% logger handler callback
@@ -72,6 +80,13 @@ all() ->
         method_405,
         validation,
         bad_charset_415,
+        grants_membership,
+        same_cell_one_set_member,
+        admin_unavailable_503,
+        admin_unauthorized_500,
+        configure_mismatch_500,
+        slow_room_503,
+        non_pseudonymous_sub_401,
         {group, mongo_down},
         {group, crash_injection},
         logs_contain_no_coordinates
@@ -81,7 +96,10 @@ groups() ->
     [
         {mongo_down, [], [mongo_unavailable_503]},
         {crash_injection, [], [
-            crash_in_cell_for, crash_function_clause_with_args, crash_case_clause_after_store
+            crash_in_cell_for,
+            crash_function_clause_with_args,
+            crash_case_clause_after_store,
+            crash_in_room_access
         ]}
     ].
 
@@ -148,11 +166,14 @@ end_per_group(_Group, _Config) ->
 
 init_per_testcase(_Case, Config) ->
     delete_all_rooms(),
+    ok = geo_fake_mim:set_mode(ok),
+    ok = geo_fake_mim:reset(),
     [{log_mark, length(geo_fake_mim:log_events())} | Config].
 
 %% meck is node-global: always unload, whatever the case did.
 end_per_testcase(_Case, _Config) ->
     catch meck:unload(),
+    geo_fake_mim:set_mode(ok),
     delete_all_rooms(),
     ok.
 
@@ -428,6 +449,8 @@ mongo_unavailable_503(_Config) ->
     {503, H, B} = locate(?BODY_A),
     <<"5">> = maps:get(<<"retry-after">>, H),
     #{<<"error">> := <<"service_unavailable">>} = json:decode(B),
+    %% Mongo is touched first: no admin call is made.
+    [] = geo_fake_mim:calls(),
     %% A bad token is still a 401: auth does not need Mongo.
     {401, _, _} = geo_ct_http:request(
         "POST",
@@ -439,6 +462,102 @@ mongo_unavailable_503(_Config) ->
         ],
         ?BODY_A
     ).
+
+%% A new cell takes the slow path; the user variable is the token's subject, the room the 200's.
+grants_membership(_Config) ->
+    Sub = new_sub(),
+    {200, _, Body} = locate_as(Sub, ?BODY_A),
+    ?BODY_200 = Body,
+    #{<<"room_jid">> := RoomJid} = json:decode(Body),
+    [set_member, create, configure, exit, set_member] = ops(),
+    Domain = <<?DOMAIN>>,
+    UserJid = <<Sub/binary, "@", Domain/binary>>,
+    [First, Create, Configure, Exit, Second] = geo_fake_mim:calls(),
+    #{vars := #{<<"room">> := RoomJid, <<"user">> := UserJid}} = First,
+    #{vars := #{<<"room">> := RoomJid, <<"user">> := UserJid}} = Second,
+    #{
+        vars := #{
+            <<"room">> := RoomJid,
+            <<"owner">> := <<"nearby-rooms@", ?DOMAIN, "/geo_service">>,
+            <<"nick">> := <<"Nearby">>
+        }
+    } = Create,
+    #{vars := #{<<"room">> := RoomJid, <<"config">> := Config}} = Configure,
+    Config = geo_xmpp_admin:room_config(),
+    #{vars := #{<<"room">> := RoomJid, <<"nick">> := <<"Nearby">>}} = Exit,
+    %% the admin credentials are sent on every call
+    true = lists:all(fun(#{auth := A}) -> A =:= expected_auth() end, geo_fake_mim:calls()).
+
+%% The room is loaded now: the second locate needs one call and answers the same bytes.
+same_cell_one_set_member(_Config) ->
+    {200, _, First} = locate_as(new_sub(), ?BODY_A),
+    ok = geo_fake_mim:reset_calls(),
+    {200, _, Second} = locate_as(new_sub(), ?BODY_B),
+    First = Second,
+    [set_member] = ops().
+
+admin_unavailable_503(_Config) ->
+    ok = geo_fake_mim:set_mode(http503),
+    {503, H, B} = locate(?BODY_A),
+    <<"5">> = maps:get(<<"retry-after">>, H),
+    #{<<"error">> := <<"service_unavailable">>} = json:decode(B),
+    [set_member] = ops().
+
+admin_unauthorized_500(Config) ->
+    ok = geo_fake_mim:set_mode(unauthorized),
+    {500, _, B} = locate(?BODY_A),
+    #{<<"error">> := <<"internal_error">>} = json:decode(B),
+    [set_member] = ops(),
+    timer:sleep(300),
+    no_leak(Config).
+
+%% A room that does not have the right config never gets a member.
+configure_mismatch_500(Config) ->
+    ok = geo_fake_mim:set_mode(configure_mismatch),
+    {500, _, B} = locate(?BODY_A),
+    #{<<"error">> := <<"internal_error">>} = json:decode(B),
+    [set_member, create, configure] = ops(),
+    timer:sleep(300),
+    Events = events_since(Config),
+    [#{step := configure_room, reason := bad_response}] =
+        [R || #{msg := {report, #{event := room_access_failed} = R}} <- Events],
+    no_leak(Config).
+
+slow_room_503(_Config) ->
+    ok = geo_fake_mim:set_mode(slow_room),
+    Start = erlang:monotonic_time(millisecond),
+    {503, H, _} = locate(?BODY_A),
+    Elapsed = erlang:monotonic_time(millisecond) - Start,
+    <<"5">> = maps:get(<<"retry-after">>, H),
+    true = Elapsed < 9000.
+
+%% Valid signature, but not a pseudonymous identity: same 401 as a bad token, no admin call.
+non_pseudonymous_sub_401(_Config) ->
+    lists:foreach(
+        fun(Sub) ->
+            {Token, _} = geo_auth:issue(Sub, <<?JWT_SECRET>>, erlang:system_time(second)),
+            {401, H, ?BODY_401} = geo_ct_http:request(
+                "POST",
+                "/api/locate",
+                [
+                    auth(Token),
+                    {"content-type", "application/json"},
+                    {"content-length", integer_to_list(byte_size(?BODY_A))}
+                ],
+                ?BODY_A
+            ),
+            ?INVALID = maps:get(<<"www-authenticate">>, H)
+        end,
+        [
+            <<"alice">>,
+            <<"U0123456789ABCDEF0123456789ABCDEF">>,
+            <<"u0123456789abcdef0123456789abcde">>,
+            <<"u0123456789abcdef0123456789abcdeg">>,
+            <<"nearby-rooms">>
+        ]
+    ),
+    [] = geo_fake_mim:calls(),
+    0 = count_rooms().
 
 %% (a) the "after decoding" crash: the exception reason carries the decoded body.
 crash_in_cell_for(Config) ->
@@ -500,6 +619,21 @@ crash_case_clause_after_store(Config) ->
     1 = meck:num_calls(geo_store, touch_room, '_'),
     no_leak(Config).
 
+%% (d) the access step crashes with the user and room in the reason.
+crash_in_room_access(Config) ->
+    ok = meck:new(geo_room_access, [passthrough]),
+    ok = meck:expect(geo_room_access, grant, fun(_Ctx, Room, User) ->
+        meck:exception(error, {injected, Room, User})
+    end),
+    {500, _, B} = locate(?BODY_A),
+    #{<<"error">> := <<"internal_error">>} = json:decode(B),
+    timer:sleep(300),
+    #{class := error, reason := injected} = one_crash(Config),
+    1 = meck:num_calls(geo_room_access, grant, '_'),
+    no_leak(Config),
+    nomatch = re_find(printed(events_since(Config)), "g7_u4pruyd"),
+    nomatch = re_find(printed(events_since(Config)), "u[0-9a-f]{32}").
+
 %% Last: everything captured during the suite, with the logger at debug.
 logs_contain_no_coordinates(_Config) ->
     %% Controls: the backstop filter is live, so a coordinate logged on purpose comes out masked.
@@ -520,6 +654,14 @@ logs_contain_no_coordinates(_Config) ->
     Names = [Name || #{msg := {report, #{event := Name}}} <- Events, is_locate(Name)],
     true = lists:member(locate_crashed, Names),
     [locate_crashed] = lists:usort(Names),
+    %% Neither a room JID nor a pseudonymous subject is ever logged.
+    lists:foreach(
+        fun(T) ->
+            nomatch = re_find(T, "g7_[0-9a-z]+@muc"),
+            nomatch = re_find(T, "u[0-9a-f]{32}")
+        end,
+        Texts
+    ),
     %% No Cowboy crash line and no crash report for a request process.
     lists:foreach(fun(T) -> nomatch = string:find(T, "had its request process") end, Texts),
     [] = [E || #{msg := {report, #{label := {proc_lib, crash}}}} = E <- Events].
@@ -614,6 +756,7 @@ start_app(Hosts, FakePort) ->
             {mongo_pool_size, ""},
             {jwt_secret, ?JWT_SECRET},
             {xmpp_domain, ?DOMAIN},
+            {xmpp_room_owner, "nearby-rooms"},
             {mim_admin_url, "http://127.0.0.1:" ++ integer_to_list(FakePort) ++ "/api/graphql"},
             {mim_admin_user, ?ADMIN_USER},
             {mim_admin_password, ?ADMIN_PASSWORD}
@@ -621,6 +764,20 @@ start_app(Hosts, FakePort) ->
     ),
     {ok, _} = application:ensure_all_started(geo_service),
     ok.
+
+expected_auth() ->
+    Basic = base64:encode(<<?ADMIN_USER, ":", ?ADMIN_PASSWORD>>),
+    <<"Basic ", Basic/binary>>.
+
+%% The admin operations the fake saw, in order.
+ops() ->
+    [Op || #{op := Op} <- geo_fake_mim:calls()].
+
+re_find(Text, Pattern) ->
+    case re:run(Text, Pattern, [{capture, none}]) of
+        match -> match;
+        nomatch -> nomatch
+    end.
 
 wait_ready(Timeout) when Timeout =< 0 ->
     ct:fail(mongo_not_ready);
@@ -662,7 +819,10 @@ new_sub() ->
     <<"u", (string:lowercase(binary:encode_hex(crypto:strong_rand_bytes(16))))/binary>>.
 
 token() ->
-    {Token, _} = geo_auth:issue(new_sub(), <<?JWT_SECRET>>, erlang:system_time(second)),
+    token_for(new_sub()).
+
+token_for(Sub) ->
+    {Token, _} = geo_auth:issue(Sub, <<?JWT_SECRET>>, erlang:system_time(second)),
     Token.
 
 auth(Token) -> {"authorization", <<"Bearer ", Token/binary>>}.
@@ -689,6 +849,20 @@ locate(Body) ->
         "/api/locate",
         [
             auth(token()),
+            {"content-type", "application/json"},
+            {"content-length", integer_to_list(byte_size(Body))}
+        ],
+        Body
+    ).
+
+%% An authenticated locate as a known subject.
+locate_as(Sub, Body) ->
+    remember_body(Body),
+    geo_ct_http:request(
+        "POST",
+        "/api/locate",
+        [
+            auth(token_for(Sub)),
             {"content-type", "application/json"},
             {"content-length", integer_to_list(byte_size(Body))}
         ],

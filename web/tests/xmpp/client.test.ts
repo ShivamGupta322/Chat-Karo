@@ -271,65 +271,54 @@ describe("joining", () => {
     expect(ctx.t.sent).toHaveLength(before);
   });
 
-  it("201 sends the instant-config IQ and reports created=true on success", async () => {
+  it("status 201 leaves the room and fails the join; no muc#owner IQ is ever sent (ADR-020)", async () => {
     const ctx = setup();
     connect(ctx);
     ctx.client.joinRoom(ROOM, "alice");
     ctx.t.pushStanza(presence("alice", ["110", "201"]));
-    expect(ctx.t.iqs).toHaveLength(1);
-    expect(ctx.t.iqs[0]?.getAttribute("to")).toBe(ROOM);
-    ctx.t.resolveIq(0, { ok: true, stanza: parse('<iq type="result"/>') });
     await vi.advanceTimersByTimeAsync(0);
-    expect(ctx.events.find((e) => e.type === "room-joined")).toEqual({
-      type: "room-joined",
+    expect(ctx.t.iqs).toHaveLength(0);
+    const leaves = ctx.t.sent.filter((s) => s.getAttribute("type") === "unavailable");
+    expect(leaves).toHaveLength(1);
+    expect(leaves[0]?.getAttribute("to")).toBe(`${ROOM}/alice`);
+    expect(ctx.events.at(-1)).toEqual({
+      type: "room-join-failed",
       roomJid: ROOM,
-      nick: "alice",
-      created: true,
+      reason: "other",
+      condition: "room-created",
     });
+    expect(types(ctx.events)).not.toContain("room-joined");
   });
 
-  it("creates a new cell room through the instant-room path (201 -> config IQ -> joined)", async () => {
-    const cellRoom = `g7_u4pruyd@${MUC}`;
-    const ctx = setup();
-    connect(ctx);
-    ctx.client.joinRoom(cellRoom, "alice");
-    ctx.t.pushStanza(presence("alice", ["110", "201"], undefined, cellRoom));
-    expect(ctx.t.iqs).toHaveLength(1);
-    expect(ctx.t.iqs[0]?.getAttribute("to")).toBe(cellRoom);
-    ctx.t.resolveIq(0, { ok: true, stanza: parse('<iq type="result"/>') });
-    await vi.advanceTimersByTimeAsync(0);
-    expect(ctx.events.find((e) => e.type === "room-joined")).toEqual({
-      type: "room-joined",
-      roomJid: cellRoom,
-      nick: "alice",
-      created: true,
-    });
-  });
-
-  it("real MongooseIM 201 frame sends one owner IQ; room-joined only after the result", async () => {
+  it("the real MongooseIM 201 frame is the same failed join", async () => {
     const ctx = setup();
     connect(ctx);
     ctx.client.joinRoom(CAPTURED_ROOM, "alice");
     ctx.t.pushStanza(CAPTURED_SELF_201);
-    expect(ctx.t.iqs).toHaveLength(1);
-    expect(ctx.t.iqs[0]?.querySelector("query")?.namespaceURI).toBe(
-      "http://jabber.org/protocol/muc#owner",
-    );
-    expect(types(ctx.events)).not.toContain("room-joined");
-    ctx.t.resolveIq(0, { ok: true, stanza: parse('<iq type="result"/>') });
     await vi.advanceTimersByTimeAsync(0);
-    // One owner IQ, then the history query that follows room-joined.
-    expect(ctx.t.iqs).toHaveLength(2);
-    expect(ctx.t.iqs[1]?.querySelector("query")?.namespaceURI).toBe(
-      "urn:xmpp:mam:2",
-    );
-    expect(ctx.events.find((e) => e.type === "room-joined")).toEqual({
-      type: "room-joined",
-      roomJid: CAPTURED_ROOM,
-      nick: "alice",
-      created: true,
+    expect(ctx.t.iqs).toHaveLength(0);
+    expect(ctx.events.at(-1)).toMatchObject({
+      type: "room-join-failed",
+      reason: "other",
+      condition: "room-created",
     });
   });
+
+  it.each(["not-allowed", "registration-required"] as const)(
+    "a %s join error is a known failure reason, with no nick retry",
+    (condition) => {
+      const ctx = setup();
+      connect(ctx);
+      ctx.client.joinRoom(ROOM, "alice");
+      ctx.t.pushStanza(presenceError(condition));
+      expect(ctx.events.at(-1)).toEqual({
+        type: "room-join-failed",
+        roomJid: ROOM,
+        reason: condition,
+      });
+      expect(joinPresences(ctx.t)).toEqual([`${ROOM}/alice`]);
+    },
+  );
 
   it("fails immediately when the room sends self unavailable while joining", () => {
     const ctx = setup();
@@ -341,29 +330,6 @@ describe("joining", () => {
       reason: "other",
     });
   });
-
-  it.each([
-    ["error", { ok: false as const, condition: "forbidden" }],
-    ["timeout", { ok: false as const, condition: "timeout" }],
-  ])(
-    "201 with IQ %s leaves and reports room-config-failed",
-    async (_n, result) => {
-      const ctx = setup();
-      connect(ctx);
-      ctx.client.joinRoom(ROOM, "alice");
-      ctx.t.pushStanza(presence("alice", ["110", "201"]));
-      ctx.t.resolveIq(0, result);
-      await vi.advanceTimersByTimeAsync(0);
-      const last = ctx.t.sent.at(-1);
-      expect(last?.getAttribute("type")).toBe("unavailable");
-      expect(ctx.events.at(-1)).toEqual({
-        type: "room-join-failed",
-        roomJid: ROOM,
-        reason: "room-config-failed",
-        condition: result.condition,
-      });
-    },
-  );
 
   it("retries a nick conflict as alice-2, alice-3, alice-4 then fails", () => {
     const ctx = setup();
@@ -1131,23 +1097,6 @@ describe("reconnect", () => {
       ),
     );
     expect(ctx.t.sent.at(-1)?.getAttribute("type")).toBe("error");
-  });
-
-  it("ignores a stale instant-room result after a drop and rejoin", async () => {
-    const ctx = setupR();
-    connect(ctx);
-    ctx.client.joinRoom(ROOM, "alice");
-    ctx.t.pushStanza(presence("alice", ["110", "201"]));
-    expect(ctx.t.iqs).toHaveLength(1);
-    drop(ctx);
-    recover(ctx);
-    ctx.events.length = 0;
-    ctx.t.resolveIq(0, { ok: true, stanza: parse('<iq type="result"/>') });
-    await vi.advanceTimersByTimeAsync(0);
-    const outcomes = ctx.events.filter(
-      (e) => e.type === "room-joined" || e.type === "room-join-failed",
-    );
-    expect(outcomes).toEqual([]);
   });
 
   it("leaveRoom while suspended reports room-left self, sends nothing and does not rejoin", () => {

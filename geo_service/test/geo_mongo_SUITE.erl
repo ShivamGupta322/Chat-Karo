@@ -489,6 +489,7 @@ start_app(Hosts, User, Password) ->
             {mongo_pool_size, ""},
             {jwt_secret, "ct-jwt-secret-0123456789-abcdefghijklmnop"},
             {xmpp_domain, "chaterl.localhost"},
+            {xmpp_room_owner, "nearby-rooms"},
             {mim_admin_url, "http://127.0.0.1:1/api/graphql"},
             {mim_admin_user, "admin"},
             {mim_admin_password, "ct-admin-password"}

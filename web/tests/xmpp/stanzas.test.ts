@@ -12,7 +12,6 @@ import {
   parseGroupchat,
   parseMucPresence,
 } from '../../src/xmpp/stanzas';
-import { buildInstantRoomConfig } from '../../src/xmpp/roomCreation';
 import {
   CAPTURED_LEAVE,
   CAPTURED_SELF_201,
@@ -45,13 +44,6 @@ describe('builders', () => {
     const xml = new XMLSerializer().serializeToString(el);
     expect(xml).not.toContain('<b>');
     expect(parse(xml).querySelector('body')?.textContent).toBe('<b>&"');
-  });
-  it('instant room config', () => {
-    const el = buildInstantRoomConfig(ROOM, 'c1');
-    expect(el.getAttribute('type')).toBe('set');
-    const q = el.firstElementChild;
-    expect(q?.namespaceURI).toBe('http://jabber.org/protocol/muc#owner');
-    expect(q?.firstElementChild?.getAttribute('type')).toBe('submit');
   });
   it('iq error reply swaps addresses and keeps id', () => {
     const r = buildIqErrorReply(

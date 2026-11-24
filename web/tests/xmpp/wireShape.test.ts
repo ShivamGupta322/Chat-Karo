@@ -1,6 +1,5 @@
 import { describe, expect, it } from "vitest";
 import { buildMamQuery } from "../../src/xmpp/mam";
-import { buildInstantRoomConfig } from "../../src/xmpp/roomCreation";
 import {
   buildIqErrorReply,
   buildJoinPresence,
@@ -43,7 +42,6 @@ describe("no builder emits a redundant xmlns", () => {
     ["mam before:id", () => buildMamQuery({ ...mam, page: { before: "F1" } })],
     ["mam after:id", () => buildMamQuery({ ...mam, page: { after: "L1" } })],
     ["join presence", () => buildJoinPresence(ROOM, "alice", 20)],
-    ["instant room config", () => buildInstantRoomConfig(ROOM, "c1")],
     ["ping", () => buildPing(ROOM, "p1")],
     [
       "iq error reply",

@@ -17,11 +17,19 @@ export type RoomAssignment =
   | { status: 'assigned'; cell: Cell; room: AssignedRoom }
   | { status: 'failed'; cell: Cell; reason: AssignFailure; room: null };
 
+/** How a refresh() ended: 'superseded' = assign(), dispose(), retry() or another refresh() replaced it. */
+export type RefreshOutcome = 'assigned' | 'failed' | 'superseded';
+
 export interface RoomAssigner {
   /** The same geohash as the current target is a no-op. */
   assign: (cell: Cell | null) => void;
   /** Immediate; only does something in 'failed'. */
   retry: () => void;
+  /**
+   * Locates again for the current target and keeps the previous room meanwhile (ADR-020: a join was
+   * refused because the server forgot our membership). Resolves when that request ends.
+   */
+  refresh: () => Promise<RefreshOutcome>;
   /** The same object until something changes (useSyncExternalStore). */
   getState: () => RoomAssignment;
   subscribe: (l: () => void) => () => void;
@@ -56,6 +64,8 @@ export function createRoomAssigner(o: {
   let timer: ReturnType<Timers['set']> | null = null;
   let attempt = 0;
   let disposed = false;
+  /** Settles the refresh() promise of the request in flight, if any. */
+  let pendingRefresh: ((outcome: RefreshOutcome) => void) | null = null;
   const listeners = new Set<() => void>();
 
   function setState(next: RoomAssignment): void {
@@ -68,7 +78,15 @@ export function createRoomAssigner(o: {
     timer = null;
   }
 
+  function settleRefresh(outcome: RefreshOutcome): void {
+    const settle = pendingRefresh;
+    pendingRefresh = null;
+    settle?.(outcome);
+  }
+
+  /** Every replacement of the request in flight goes through here, so a refresh() never hangs. */
   function cancelRequest(): void {
+    settleRefresh('superseded');
     ctrl?.abort();
     ctrl = null;
     generation += 1;
@@ -76,10 +94,16 @@ export function createRoomAssigner(o: {
 
   function fail(cell: Cell, reason: AssignFailure): void {
     setState({ status: 'failed', cell, reason, room: null });
+    settleRefresh('failed');
   }
 
   /** Starts one request for `cell`, keeping `kept` while it runs. Offline: no request. */
-  function begin(cell: Cell, kept: AssignedRoom | null): void {
+  function begin(
+    cell: Cell,
+    kept: AssignedRoom | null,
+    onSettled: ((outcome: RefreshOutcome) => void) | null = null,
+  ): void {
+    pendingRefresh = onSettled;
     if (!online.isOnline()) {
       fail(cell, 'offline');
       return;
@@ -105,6 +129,7 @@ export function createRoomAssigner(o: {
         }
         attempt = 0;
         setState({ status: 'assigned', cell, room: { jid: v.roomJid, cell: v.cell } });
+        settleRefresh('assigned');
         return;
       }
       const e = r.error;
@@ -150,6 +175,16 @@ export function createRoomAssigner(o: {
     begin(state.cell, null);
   }
 
+  function refresh(): Promise<RefreshOutcome> {
+    if (disposed || target === null) return Promise.resolve('superseded');
+    const cell = target;
+    clearTimer();
+    cancelRequest();
+    return new Promise<RefreshOutcome>((resolve) => {
+      begin(cell, state.room, resolve);
+    });
+  }
+
   const offlineUnsub = online.subscribe(() => {
     if (state.status === 'failed' && (state.reason === 'offline' || state.reason === 'unavailable')) {
       retry();
@@ -175,6 +210,7 @@ export function createRoomAssigner(o: {
       begin(cell, state.room);
     },
     retry,
+    refresh,
     getState: () => state,
     subscribe(l) {
       listeners.add(l);

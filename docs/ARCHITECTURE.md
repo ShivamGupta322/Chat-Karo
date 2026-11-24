@@ -63,14 +63,15 @@ In production a reverse proxy (Caddy or nginx) terminates TLS and routes `/api` 
 ### Locate & join
 1. Client gets a fix from `navigator.geolocation.watchPosition` and turns it into a precision-7 cell with `cellFor`; the raw fix is discarded inside `geo/`.
 2. On a committed cell change (the ADR-013 triggers, plus a retry after an error) `geo/roomAssigner` posts `{lat, lng}` = **the centre of that cell** (never the raw fix) through `api/locate.ts` and `withToken` (JWT auth), and aborts any earlier request (ADR-019 D3).
-3. geo_service (Phase 3d implements validation, the cell, the rooms upsert and the reply; rate limit, jump check, `geo_room` and places are not built yet):
+3. geo_service (Phase 3d implements validation, the cell, the rooms upsert and the reply; Phase 3f adds the room access step below; rate limit, jump check, `geo_room` and places are not built yet):
    - validates input (lat ∈ [-90,90], lng ∈ [-180,180], accuracy sane);
    - checks rate limit + impossible-jump against the user's *last cell centre and timestamp* (ETS — no raw coords kept);
    - encodes geohash at the range's precision; computes the room JID;
    - ensures a `geo_room` process exists for the cell (starts it on demand);
    - upserts the `rooms` document; returns `{cell, room_jid, neighbours?, places_nearby}`.
    - **discards lat/lng.**
-4. The client validates the answer (exact equality with `g<precision>_<cell>@<muc domain>`) and joins `room_jid/nick` through `useAreaRoom`; it leaves the old room only after the new assignment has arrived. On failure or location loss it leaves and shows why (retry button, automatic backoff).
+   - **Phase 3f (ADR-020): makes the caller a `member` of the cell's members-only room before answering 200** (`geo_room_access:grant/3`, 8 s deadline): one admin call when the room is loaded, otherwise create (as the room-owner account), configure, owner leaves, set member. MongooseIM unavailable or too slow is 503, any other failure 500.
+4. The client validates the answer (exact equality with `g<precision>_<cell>@<muc domain>`) and joins `room_jid/nick` through `useAreaRoom` (it never creates a room; a join refused with `registration-required`/`not-allowed` locates once more and rejoins once, then offers "Try again": `useAccessRecovery`, ADR-020); it leaves the old room only after the new assignment has arrived. On failure or location loss it leaves and shows why (retry button, automatic backoff).
 
 ### Moving
 Client-side `geo/` applies hysteresis: it only calls `/api/locate` when the device is ≥ a margin inside
@@ -145,6 +146,14 @@ decoding runs in one try/catch that logs only a sanitised summary, because the b
 (Phase 4). The client switch (device credential, token manager, Welcome page, locate flow) is designed in ADR-019 and lands in
 3e-2 and 3e-3.
 
+**Status (Phase 3f):** MUC rooms are created only by geo_service (ADR-020). `mod_muc` has `access_create = "muc_create"` allowing only the
+room-owner account (`XMPP_ROOM_OWNER`, default `nearby-rooms`, registered lazily) and `default_room` options members-only, not public, not
+listed, no private messages, no occupant queries, no subject changes, no invites. `geo_room_access` (no processes) runs the admin calls under
+one deadline; `geo_http_locate` receives the admin client and the room-owner name, and accepts only `u`+32-hex subjects. Stored room options
+override `default_room`, so the slow path re-applies the constant config (`geo_xmpp_admin:room_config/0`). After a MongooseIM restart rooms are
+unloaded and joins get `not-allowed` until a locate loads them (`dev-seed.sh` does it for the lobby). Residuals (disco after restart, occupant
+counts, existence oracle) stay until opaque room names (slice 3g).
+
 `geohash` API (pure; no logging, no processes; matches `web/src/geo/geohash.ts`):
 
 | Function | Returns |
@@ -185,7 +194,8 @@ decoding runs in one try/catch that logs only a sanitised summary, because the b
 | `geo_auth` | Pure HS256 JWT issue/verify (HS256 only, constant-time signature check before the payload is parsed) |
 | `geo_nickname` | Pure nickname rules and the reserved list |
 | `geo_session` | Creates a session (reserve the nickname, register the XMPP account, activate, issue the JWT, roll back on failure) and renews one (`renew/3`: credential shape, active profile, admin `checkPassword`, JWT) |
-| `geo_xmpp_admin` | MongooseIM admin GraphQL client (`registerUser`, `removeUser`, `checkPassword`); later room affiliations. Never logs bodies |
+| `geo_xmpp_admin` | MongooseIM admin GraphQL client (`registerUser`, `removeUser`, `checkPassword`, and for MUC: `setUserAffiliation`, `createInstantRoom`, `changeRoomConfiguration`, `exitRoom`); constant documents, per-call timeout. Never logs bodies |
+| `geo_room_access` | `grant/3`: makes a user a `member` of a cell room before `/api/locate` answers (fast path 1 call; slow path create, configure, exit, set member); no processes; one deadline; logs one atom-only `room_access_failed` per failure |
 | `geo_store` | All MongoDB access: rooms (`touch_room/1,2`, `get_room/1`) and profiles (`create_pending_profile/3`, `activate_profile/1`, `delete_profile/1`, `get_profile/1`); places and reports later. Takes cells, never coordinates |
 
 ### HTTP API (v1)
@@ -194,7 +204,7 @@ decoding runs in one try/catch that logs only a sanitised summary, because the b
 |---|---|---|
 | POST | `/api/session` | `{nickname}` → `201 {nickname, jid, xmpp_password, token, token_type:"Bearer", expires_in:3600}`; errors `400 invalid_json / invalid_request / invalid_nickname`, `405`, `409 nickname_taken` (also for reserved names), `413`, `415`, `503` (+ `retry-after: 5`), `500`. Body cap 1024 bytes. Never logged |
 | POST | `/api/session/renew` | `{jid, xmpp_password}` → `200 {nickname, token, token_type:"Bearer", expires_in:3600}`; errors `400 invalid_json / invalid_request`, `401 invalid_credentials` (one constant body for every credential failure), `405`, `413`, `415`, `503` (+ `retry-after: 5`), `500`. Body cap 1024 bytes. Never logged |
-| POST | `/api/locate` | `Authorization: Bearer`, `{lat, lng, range?, accuracy?}` → `200 {cell, precision, range, room_jid}` (same bytes for a new and an existing room); errors `401` (+ `www-authenticate`), `400 invalid_json / invalid_request / invalid_location`, `405`, `413`, `415`, `503` (+ `retry-after: 5`), `500`. Body cap 256 bytes. Never logged. `places` / neighbours come later |
+| POST | `/api/locate` | `Authorization: Bearer`, `{lat, lng, range?, accuracy?}` → `200 {cell, precision, range, room_jid}` (same bytes for a new and an existing room); errors `401` (+ `www-authenticate`), `400 invalid_json / invalid_request / invalid_location`, `405`, `413`, `415`, `503` (+ `retry-after: 5`; also when MongooseIM is unavailable or the 8 s room-access deadline passes), `500` (also on a room-access failure). Only `u`+32-hex subjects are accepted (any other subject: `401` `invalid_token`). Body cap 256 bytes. Never logged. `places` / neighbours come later |
 | GET | `/api/rooms/nearby?cell=…` | → active rooms in neighbouring cells |
 | GET | `/api/places?cell=…` | → named places in/near cell |
 | POST | `/api/report` | `{room_jid, message_id, reason}` → `204` |
@@ -276,6 +286,8 @@ State flow: `useLocation` → `useArea` (committed Cell) → `roomAssigner` → 
 - Input validation at every HTTP handler; message length limits enforced in MongooseIM config + client.
 - Rate limits: per-user locate (token bucket), per-room slow mode, MongooseIM traffic shaping.
 - No coordinates in logs, DB, or XMPP stanzas.
+- MUC rooms are created only by geo_service through the room-owner account and are members-only, unlisted and hardened (ADR-020); never put a place name or cell in a room title or description.
+- The admin client reaches the locate handler only for room membership; its bodies, the owner's random password, and a room JID together with a subject are never logged.
 
 ## Observability
 

@@ -69,7 +69,7 @@ XMPP ports 5280/5222 bind to `127.0.0.1` by default (`XMPP_BIND_ADDR` opts in to
 names, never config lines. Upgrading MongooseIM means re-diffing the template against the new image's default config.
 
 ## ADR-008 — Web XMPP layer design
-**Status:** Accepted (Phase 2, slice 2a)
+**Status:** Accepted (Phase 2, slice 2a). Amended by ADR-020 (3f-1): the client no longer creates rooms; the instant-room (201 + `muc#owner`) path is removed and a 201 is a failed join.
 **Context:** The web client needs a robust, testable XMPP layer, and components must never touch Strophe directly.
 **Decision:**
 - All XMPP logic lives in `web/src/xmpp/client.ts`, written against an `XmppTransport` interface. Strophe.js
@@ -179,7 +179,7 @@ to the login form, lost their room and left ghost occupants holding their nickna
 
 ## ADR-011 — Room history via MAM
 **Status:** Accepted (Phase 2, slice 2b-2a, 2026-11-18). Amends ADR-010. **Extended by ADR-012**, which also corrects
-this ADR's catch-up and initial-load live evidence.
+this ADR's catch-up and initial-load live evidence. **Access to the archive is narrowed by ADR-020 (3f-1):** in members-only rooms only owner, admin and member read the MAM archive, so a non-member can no longer read it without joining.
 **Context / root cause (MongooseIM 6.2.1):**
 - `mod_muc_room:broadcast_room_packet` passes `timestamp => Activity#activity.message_time` to the MAM archive hook.
 - `store_user_activity` only keeps the sender's activity record when a MUC rate limit is configured (non-zero
@@ -375,7 +375,7 @@ the ≥ 1100 ms global throttle and one query per room are unchanged.
   the user's OK).
 
 ## ADR-013 — Temporary client-side cell assignment and location states
-**Status:** Accepted (Phase 2, slice 2c-1, 2026-11-19). A **temporary deviation from ADR-005** until Phase 3. **Partly superseded by ADR-019 (3e-3):** the client no longer assigns rooms (`roomJidForCell` deleted); section 2: the cell centre leaves `geo/` via `api/locate.ts`; section 3: the triggers now drive `/api/locate`; section 4: the controller consumes the server's `room_jid`. Sections 1 and 5-8 stand; "anyone can join any `g7_` room" stays until 3f. Builds on
+**Status:** Accepted (Phase 2, slice 2c-1, 2026-11-19). A **temporary deviation from ADR-005** until Phase 3. **Partly superseded by ADR-019 (3e-3):** the client no longer assigns rooms (`roomJidForCell` deleted); section 2: the cell centre leaves `geo/` via `api/locate.ts`; section 3: the triggers now drive `/api/locate`; section 4: the controller consumes the server's `room_jid`. Sections 1 and 5-8 stand; "anyone can join any `g7_` room" is resolved by ADR-020 (3f-1; residuals listed there: after a MongooseIM restart disco lists stored room names, room disco#info shows the occupant count, and join errors reveal whether a room exists; slice 3g closes them). Builds on
 ADR-001 (cells), ADR-008 (transport seam, instant rooms) and ADR-009 (tokens, plain-language text).
 **Context:** Phase 2 ends with "client-side geohash, join room, chat" before geo_service exists. ADR-005 says the server
 assigns rooms and coordinates are never stored; this slice has to compute the cell in the browser.
@@ -1211,3 +1211,112 @@ that case fails, so the test is not vacuous.
   271 841 B ceiling by 1 322 B (see Bundle above).
 - Cleanup: `tester_a` and `tester_b` removed with `mongooseimctl account removeUser`, their profiles and the three test rooms deleted
   (`rooms` empty); `listUsers` shows alice, bob and two accounts created by the owner outside this test (kept); browser storage cleared.
+
+---
+
+## ADR-020 — MUC lockdown: server-created, members-only, unlisted rooms
+**Status:** Accepted (Phase 3, slice 3f-1, 2026-11-23). Amends ADR-008 (no client room creation), ADR-011 (MAM access in members-only rooms) and ADR-013 ("anyone can join any `g7_` room" and the room-disco leak).
+**Context:** Until now any client could create and join any `g7_*` room: `access_create` allowed every local user, rooms were public and listed, and the web client sent the instant-room `muc#owner` IQ on a 201. MAM of an open room is readable by anyone not outcast without joining. The location product needs "you can only be in the room of the cell you located into".
+
+**Decisions (user, 2026-11-23):**
+- **D1-A members-only.** Rooms are members-only; geo_service grants `member` per successful `POST /api/locate`. (B, open but unlisted, would let anyone join any cell and read its 24 h MAM.)
+- **D2-A persistent rooms** (as before). Temporary rooms are fragile (`exitRoom` destroys them) and are revisited with Phase 4.
+- **D3-A no membership revoke in this slice.** Revoke-on-move (supervised ETS owner of user to last room, set the old room NONE after the new grant) is slice 3f-2, right after. Memberships accumulate in PostgreSQL until then.
+- **D4-A keep `g7_<geohash>` names** for now. Opaque HMAC-derived names are slice 3g, before Phase 3 closes.
+- **D5-A delete the 10 existing MUC rooms and their affiliations** (done by the orchestrator before this slice; lobby is re-seeded; MAM rows stay). Counts are recorded under Live evidence.
+- **D6-A accept MongooseIM warning logs in dev** (a denied creation logs `check_user_can_create_room_failed` with the JID and room at warning); `loglevel = "error"` in Phase 6 production.
+
+**Decision:**
+1. **Only geo_service creates rooms.** `access_create = "muc_create"` allows only the ACL `muc_room_owner` (`{user = "{{XMPP_ROOM_OWNER}}"}`, default `nearby-rooms`, a localpart `^[a-z][a-z0-9-]{2,31}$` that cannot collide with `u` + 32 hex; `geo_config:parse_room_owner/1`). The account is registered lazily on the first `user_not_found` from `createInstantRoom`, with a random password from `geo_session:new_password/0` that is discarded and never logged. The same variable is passed to the mongooseim and geo_service containers.
+2. **Room options** (`[modules.mod_muc]` `default_room.*` in the template, and the constant `geo_xmpp_admin:room_config/0` re-applied by geo_service): `public=false`, `public_list=false`, `members_only=true`, `persistent=true`, `anonymous=true`, `allow_private_messages=false`, `allow_query_users=false`, `allow_change_subj=false`, `allow_user_invites=false`, `maygetmemberlist=[]`. `max_users` stays 200; title and description stay empty: never put a place or cell there. `access_create` stays `muc_create`; do not re-enable client room creation, `public`/`public_list`, private messages or `allow_query_users` without a new ADR.
+3. **`POST /api/locate` grants access before answering 200** (`geo_room_access:grant/3`, no processes, one hard 8 s deadline, each admin call `min(5000, time left)` and none started with under 250 ms left). Order: validate, Mongo `touch_room` (Mongo down gives 503 and no admin call), then access, then the reply. The 200 body is unchanged. Only pseudonymous subjects (`u` + 32 lowercase hex) may locate; any other valid-signature subject gets the same 401 `invalid_token`.
+   - Fast path (room loaded): one call, `setUserAffiliation MEMBER`.
+   - Slow path (`room_not_found`, e.g. a new cell or after a MongooseIM restart): `createInstantRoom` with the owner full JID `<owner>@<domain>/geo_service` and nick `Nearby` (on `user_not_found`: register the owner, then create once more) → `changeRoomConfiguration` with the constant config (every field of the answer must equal the request, else failure and nobody is granted) → `exitRoom` for the owner's ghost occupant (best effort) → `setUserAffiliation MEMBER`.
+   - Failure mapping: MongooseIM unreachable, 5xx or deadline gives 503 `service_unavailable` + `retry-after: 5`; an admin 401, unexpected answer or uncreatable room gives 500 `internal_error` and one `room_access_failed` warning with atoms only (step, reason). The GraphQL documents are constants with variables only; bodies, passwords and room JIDs together with a subject are never logged.
+4. **Web client.** It never creates a room: a join answered with status 201 sends a leave presence and fails with reason `other`, condition `room-created`; no `muc#owner` IQ exists any more (`roomCreation.ts`, `NS_MUC_OWNER`, `room-config-failed` and the `iqTimeoutMs` option removed). `not-allowed` joins the known failure reasons. A join refused with `registration-required` or `not-allowed` for the assigned room locates once more (`roomAssigner.refresh()`) and rejoins once (`useAccessRecovery`); a second refusal before a successful join shows "Nearby couldn't let you into this area's chat." with a manual "Try again". There is no loop.
+5. **dev-seed.sh** registers the owner account, creates `lobby` through it, applies the config, and makes alice and bob members. **Re-run it after restarting MongooseIM.**
+
+**Verified facts (MongooseIM 6.2.1)** (release source in the container, `/usr/lib/mongooseim/lib/mongooseim-6.2.1/{src,include,priv}`, and https://esl.github.io/MongooseDocs/6.2.1/modules/mod_muc/):
+- Config keys: `access_create` (default `all`) and `default_room.{public, public_list, persistent, members_only, anonymous, allow_private_messages, allow_query_users, allow_change_subj, allow_user_invites, maygetmemberlist, max_users, title, description}` exist (`mod_muc.erl` `config_spec/0`, `default_room_config_spec/0`); ACL `[acl] name = [{user = "x"}]` matches the current domain (`mongoose_config_spec.erl`); a rule with no matching clause denies (`acl.erl`).
+- **Stored options override the template defaults**, and a room restored from the database keeps its old options. Every slow path therefore re-applies the config; a future config change needs reconfigure-on-load or a migration.
+- `load_permanent_rooms_at_startup` is ignored in 6.2.1; `hibernated_room_check_interval` / `hibernated_room_timeout` default to `infinity` and must stay so, otherwise rooms would unload while in use.
+- **Restart trap** (`mod_muc.erl` `route_to_room`): a join presence to an unloaded room checks `access_create` before restoring from the database, so after any restart members get `not-allowed` until something allowed (geo_service as the owner) loads the room; MongooseIM logs `check_user_can_create_room_failed` at warning. IQs restore without that check. This is why the client recovers by locating again.
+- Service disco#items lists loaded rooms only if `public` or the asker is an occupant/admin, but **persistent unloaded rooms are listed to everyone by name**. Room `disco#info` is answered to anyone (title, `muc#roominfo_occupants`); room `disco#items` is forbidden to non-occupants only when `public_list = false`.
+- Members-only: a non-member join gets `<registration-required/>`; MAM (`can_read_conference/2`) is readable by owner, admin and member only; an open room's archive is readable by anyone not outcast. Setting the same affiliation again is an ok no-op.
+- Admin GraphQL (`priv/graphql/schemas/admin/muc.gql`, resolver `mongoose_graphql_muc_admin_mutation.erl`, `extensions.code` = reason atom): `createInstantRoom(room, owner: JID!, nick)` joins as the owner (checks `access_create` against the owner), restores a stored room or loads it; `setUserAffiliation` acts as the room's first owner and needs the room loaded (`room_not_found` otherwise); `changeRoomConfiguration` needs the room loaded; `exitRoom(room, user: FullJID!, nick)` is fire-and-forget. `createInstantRoom` leaves the owner as an occupant without a session (the room expels it after the subject bounce), hence `exitRoom`.
+
+**Residuals (do not claim "cells are hidden" until slice 3g):**
+- With deterministic `g7_<geohash>` names: after a MongooseIM restart disco#items lists the stored room names; room disco#info exposes the live occupant count; whether a cell room exists is an oracle.
+- Memberships accumulate in PostgreSQL until slice 3f-2, and MAM keeps the sender JID per room for 24 h (Phase 4 purge).
+- Concurrent first locates of one cell may double-create; the owner's join and expulsion are briefly visible. Accepted.
+- MUC nickname registration (`jabber:iq:register` to `muc.<domain>`) blocks a nick in every room, so the client falls back to `Name-2`. Follow-up (Phase 5).
+- MongooseIM logs the JID and room on a denied creation (D6).
+
+**Consequences:**
+- A 200 from `/api/locate` now means the caller is a member of that cell's room; `/api/locate` depends on MongooseIM (503 when it is down), where before it needed Mongo only. The locate handler receives the admin client; it still has no profile access.
+- After a MongooseIM restart members cannot rejoin until they locate again (automatic, once) or `dev-seed.sh` is re-run for the lobby.
+- `geo_xmpp_admin` gains `set_member/4`, `create_room/5`, `configure_room/3`, `exit_room/5` and `register_user/5` (timeout argument); `geo_room_access` is new.
+- Bundle: JS 274 536 B raw (86 405 B by `gzip -c | wc -c`), +1 373 B against the 273 163 B baseline; the ceiling for this slice was 277 163 B. **New baseline 274 536 B** (next ceiling 278 536 B).
+- Config is applied only on the slow path. If `create_room` succeeds and `configure_room` then fails or times out, the room stays loaded with the template defaults and later locates take the fast path without re-applying the constant. Harmless today (the template defaults equal the constant, old rooms were deleted under D5), but the first future room-config change needs reconfigure-on-load or a migration.
+- Review fix (round 1): `useAccessRecovery` gives the attempt back after any failed or superseded refresh, even when the assigner's `fail()` already cleared the desired room; otherwise the assigner's own retry after a 503 brought the same room back and the client showed "couldn't let you in" although the server would admit it (regression test in `tests/state/useAccessRecovery.test.tsx`).
+
+### Probe (AC6)
+**2026-11-23, `mongooseimctl` inside the recreated mongooseim container (new template), before the new geo_service image was deployed:**
+- Rendered config (grep of the four relevant line groups only): `access_create = "muc_create"`, the nine `default_room.*` values from the
+  template, `muc_room_owner = [{user = "nearby-rooms"}]`, `muc_create = [{acl = "muc_room_owner", value = "allow"}]`. MongooseIM
+  accepted `maygetmemberlist = []` and started healthy.
+- `account registerUser nearby-rooms` (random password, never printed) → registered.
+- `muc createInstantRoom --room probe3f@… --owner nearby-rooms@chaterl.localhost/geo_service --nick Nearby` → `jid probe3f@muc.chaterl.localhost`.
+- `getRoomConfig` → public false, publicList false, persistent true, membersOnly true, anonymous true, allowPrivateMessages false,
+  allowQueryUsers false, allowChangeSubject false, allowUserInvites false, mayGetMemberList [], title "", description "" (also
+  moderated true, membersByDefault true, maxUsers 200).
+- `exitRoom` → "Exiting room message sent successfully"; `listRoomUsers` 2 s later → `[]` (the owner is gone).
+- `setUserAffiliation alice MEMBER` twice → "Affiliation set successfully" both times; `listRoomAffiliations` → alice MEMBER,
+  nearby-rooms OWNER.
+- `changeRoomConfiguration --config '<the constant JSON>'` (the dev-seed form) → accepted, values echoed.
+- `deleteRoom` → deleted; `muc_rooms`/`muc_room_aff` back to 0/0. No deviation from the plan.
+- Step 0 (user-approved D5-A), before the probe: with mongooseim stopped, one transaction deleted 10 `muc_room_aff` and 10
+  `muc_rooms` rows on `muc.chaterl.localhost` (10/10 → 0/0). MAM rows untouched.
+
+### Live evidence (3f-1)
+**2026-11-23, rebuilt geo_service image, recreated mongooseim, `npm run dev` in the in-app browser pane (the pane ran as a
+background page, so actions were driven by in-page script), all four services healthy:**
+- `dev-seed.sh`: owner "already exists — skipped", lobby created, configured, alice and bob made members.
+  `listRoomAffiliations lobby` → alice MEMBER, bob MEMBER, nearby-rooms OWNER; `getRoomConfig lobby` equals the constant.
+- AC8: two new identities (`lock_a`, `lock_b`) at test spot A → one `/api/locate` 200 each, joined `g7_u4pruyd` with no presence
+  error, "People here · 2", messages delivered both ways, and after reloading B both messages came back from MAM.
+  `listRoomAffiliations g7_u4pruyd` → nearby-rooms OWNER plus exactly the two pseudonymous accounts as MEMBER;
+  `getRoomConfig` equals the constant.
+- AC9: raw XMPP-over-WebSocket script as alice (not a member; password read from `.env`, never printed):
+  (a) disco#items on `muc.chaterl.localhost` while `g7_u4pruyd` was loaded → 0 items;
+  (b) join `g7_u4pruyd` → `registration-required`;
+  (c) MAM query to `g7_u4pruyd` → `not-allowed`, 0 messages returned;
+  (d) join `probe-<random>` → `not-allowed`, `muc_rooms` count 2 before and after;
+  (e) room disco#items → `forbidden`;
+  (f) room disco#info → answered, identity name `g7_u4pruyd`, `muc#roominfo_occupants` 4 (two users plus two stream-management
+  ghosts from reloads), features `muc_hidden, muc_membersonly, muc_moderated, muc_persistent, muc_semianonymous`. This is the D4
+  residual that slice 3g closes.
+- AC11: the same script right after `docker compose restart mongooseim` (35 s) → service disco#items listed `lobby` (stored, not
+  loaded) and no `g7_` room, because the clients had already reloaded `g7_u4pruyd` through `/api/locate`. The residual is real
+  (unloaded stored rooms are listed by name to anyone) and is closed by 3g.
+- AC10: after the restart, tab A: rejoin → `not-allowed` → exactly one `/api/locate` 200 → rejoined, no error text. Tab B
+  (throttled background tab) reconnected later and joined at once without a refusal, since A had reloaded the room. After the
+  second restart (AC12) tab B showed the designed path too: `not-allowed` → one locate → joined (its old nickname was held by a
+  stream-management ghost, so it joined as `lock_b-2`, the known ADR-010 carry-forward). Over the following 2 minutes: 0 new
+  `/api/locate` in either tab. geo_service RestartCount 0.
+- AC12: `docker compose stop mongooseim`, tab A picks spot B → `/api/locate` 503 after 3.5 s, "Nearby can't reach your area chat
+  right now. We'll keep trying." with "Find my area chat"; `POST /api/session` also 503. After `start`: 503 ×3 in total, then 200
+  and a join of `g7_u4pruye` with no click. (The `retry-after: 5` header is asserted in CT; no token was at hand to curl it live.)
+- AC13: geo_service logs (78 lines) → 0 hits for the A/B cell-centre digits, raw spot values, `eyJ`, `xp1_`, `g7_u4pruy`,
+  `room_access_failed` and `locate_`; the two subs appear only in the existing `session_created` lines (ADR-017), never with a room.
+  MongooseIM logged `check_user_can_create_room_failed` 4 times (two outsider probes, two refused rejoins), as D6 expects.
+- AC14: after re-running `dev-seed.sh` (the restarts unloaded the lobby), bob and then alice (scratchpad XMPP script) joined the
+  members-only lobby and sent a message; alice's MAM query returned both. The smoke page itself was not driven, to avoid typing the
+  dev password from `.env` into a page.
+- Also seen: after a Docker Desktop restart, MongooseIM crashed twice on cold boot (`mongoose_wpool_rdbms_mgr` start_pool timeout
+  while Postgres was still starting) and came up on the third start. A pre-existing startup race, not caused by 3f: compose's
+  `depends_on: service_healthy` is already set, but Docker's restart policy brings containers back without that ordering. The
+  restart policy recovers it; a longer RDBMS pool start timeout would be the follow-up if it matters for deployment.
+- AC15: `g7_u4pruyd` and `g7_u4pruye` loaded through the owner and deleted; the three test accounts removed; their profiles and
+  the two Mongo room docs deleted. Left: `muc_rooms` = lobby (alice, bob members; nearby-rooms owner); `listUsers` = alice, bob,
+  nearby-rooms and the owner's two own accounts; browser storage empty.

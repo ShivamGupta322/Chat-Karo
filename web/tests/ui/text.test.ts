@@ -18,11 +18,11 @@ const JOIN_FAILURES: JoinFailure[] = [
   'not-authorized',
   'forbidden',
   'registration-required',
+  'not-allowed',
   'service-unavailable',
   'not-acceptable',
   'item-not-found',
   'timeout',
-  'room-config-failed',
   'not-connected',
   'invalid-room',
   'invalid-nick',
@@ -77,6 +77,30 @@ describe('describeJoinFailure / describeSendError', () => {
   });
   it.each(SEND_ERRORS)('describes send error %s', (error) => {
     expect(describeSendError(error).length).toBeGreaterThan(0);
+  });
+  it('has a text for every JoinFailure and none for removed ones', () => {
+    // Compile-time exhaustive: adding or removing a JoinFailure breaks this literal until the test is updated.
+    const all: Record<JoinFailure, true> = {
+      conflict: true,
+      'not-authorized': true,
+      forbidden: true,
+      'registration-required': true,
+      'not-allowed': true,
+      'service-unavailable': true,
+      'not-acceptable': true,
+      'item-not-found': true,
+      timeout: true,
+      'not-connected': true,
+      'invalid-room': true,
+      'invalid-nick': true,
+      other: true,
+    };
+    expect(Object.keys(all).sort()).toEqual([...JOIN_FAILURES].sort());
+  });
+  it('has the access-recovery texts', () => {
+    expect(describeJoinFailure('not-allowed')).toBe("You can't open this room.");
+    expect(AREA_TEXT.accessDenied).toBe("Nearby couldn't let you into this area's chat.");
+    expect(AREA_TEXT.accessRetry).toBe('Try again');
   });
   it('uses the plan wording for a few key strings', () => {
     expect(describeJoinFailure('conflict')).toBe('That name is already taken in this room.');

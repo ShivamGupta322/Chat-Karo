@@ -213,6 +213,7 @@ set_session() ->
         [
             {jwt_secret, "http-suite-jwt-secret-0123456789-abcdefgh"},
             {xmpp_domain, "chaterl.localhost"},
+            {xmpp_room_owner, "nearby-rooms"},
             {mim_admin_url, "http://127.0.0.1:1/api/graphql"},
             {mim_admin_user, "admin"},
             {mim_admin_password, "http-suite-admin-password"}

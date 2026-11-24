@@ -36,11 +36,11 @@ export type JoinFailure =
   | 'not-authorized'
   | 'forbidden'
   | 'registration-required'
+  | 'not-allowed'
   | 'service-unavailable'
   | 'not-acceptable'
   | 'item-not-found'
   | 'timeout'
-  | 'room-config-failed'
   | 'not-connected'
   | 'invalid-room'
   | 'invalid-nick'
@@ -110,7 +110,6 @@ export type WakeTrigger = 'visible' | 'online' | 'user';
 export interface XmppClientOptions {
   mucDomain: string;
   joinTimeoutMs?: number;
-  iqTimeoutMs?: number;
   maxNickRetries?: number;
   /** Messages per history page. Default 50 (= server max_result_limit). */
   mamPageSize?: number;

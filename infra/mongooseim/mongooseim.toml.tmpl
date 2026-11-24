@@ -94,8 +94,21 @@
   access = "muc"
   access_create = "muc_create"
   backend = "rdbms"
+  # Rooms are created only by geo_service through the room-owner account (access_create above, ADR-020).
+  # Stored room options override these defaults, and a room restored from the database keeps its old options;
+  # geo_service therefore re-applies the same config whenever it has to (re)create a room on locate.
+  # load_permanent_rooms_at_startup is ignored in 6.2.1, and hibernated_room_check_interval /
+  # hibernated_room_timeout must stay at their default `infinity` so loaded rooms stay loaded until restart.
   default_room.persistent = true
-  default_room.public = true
+  default_room.public = false
+  default_room.public_list = false
+  default_room.members_only = true
+  default_room.anonymous = true
+  default_room.allow_private_messages = false
+  default_room.allow_query_users = false
+  default_room.allow_change_subj = false
+  default_room.allow_user_invites = false
+  default_room.maygetmemberlist = []
   # Workaround for a MongooseIM 6.2.1 bug: with no MUC rate limit configured, mod_muc_room does not keep the
   # sender's activity record, so MAM archives room messages with timestamp 0 (1970 stamps, counter-like ids
   # that collide after a restart → duplicate_key, messages dropped). Any user shaper makes it keep the record.
@@ -132,6 +145,8 @@
 
 [acl]
   local = [{}]
+  # The only account allowed to create MUC rooms (geo_service's room owner, ADR-020).
+  muc_room_owner = [{user = "{{XMPP_ROOM_OWNER}}"}]
 
 [access]
   max_user_sessions = [
@@ -162,7 +177,7 @@
   ]
 
   muc_create = [
-    {acl = "local", value = "allow"}
+    {acl = "muc_room_owner", value = "allow"}
   ]
 
   muc = [

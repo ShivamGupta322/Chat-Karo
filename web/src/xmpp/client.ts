@@ -7,7 +7,6 @@ import {
   parseMamResult,
   type MamItem,
 } from "./mam";
-import { acceptInstantRoom } from "./roomCreation";
 import {
   buildGroupchat,
   buildIqErrorReply,
@@ -48,7 +47,6 @@ interface TrackedRoom {
   baseNick: string;
   nick: string;
   attempt: number;
-  configuring: boolean;
   occupants: Set<string>;
   timer: ReturnType<typeof setTimeout> | null;
   /** Newest known stanza-id (live or history). Survives suspend/rejoin; drives the catch-up query. */
@@ -81,6 +79,7 @@ const KNOWN_FAILURES: ReadonlySet<string> = new Set<JoinFailure>([
   "not-authorized",
   "forbidden",
   "registration-required",
+  "not-allowed",
   "service-unavailable",
   "not-acceptable",
   "item-not-found",
@@ -111,7 +110,6 @@ export function createXmppClient(
   options: XmppClientOptions,
 ): XmppClient {
   const joinTimeoutMs = options.joinTimeoutMs ?? 10_000;
-  const iqTimeoutMs = options.iqTimeoutMs ?? 10_000;
   const maxNickRetries = options.maxNickRetries ?? 3;
   const mamPageSize = options.mamPageSize ?? 50;
   const mamMaxGapPages = options.mamMaxGapPages ?? 5;
@@ -231,7 +229,6 @@ export function createXmppClient(
       // The server may still hold the old nick (or its -N variant); always start from the base nick.
       room.nick = room.baseNick;
       room.attempt = 0;
-      room.configuring = false;
       room.occupants = new Set();
       room.state = "joining";
       sendJoin(room);
@@ -398,40 +395,28 @@ export function createXmppClient(
       }
       return;
     }
-    if (p.kind === "unavailable" && isSelf && !room.configuring) {
+    if (p.kind === "unavailable" && isSelf) {
       // e.g. the room was destroyed mid-join; fail now instead of waiting for the join timer.
       failJoin(room, "other", "unavailable");
       return;
     }
-    if (p.kind !== "available" || room.configuring) return;
+    if (p.kind !== "available") return;
     // The server's resource is the real nick (handles status 210).
     room.nick = p.nick;
-    if (!p.statusCodes.has("201")) {
-      markJoined(room, false);
+    if (p.statusCodes.has("201")) {
+      // Status 201 means this join just created the room. Rooms are created only by geo_service
+      // (ADR-020), so this is unexpected: leave again and never configure it, which would let the
+      // client finish a half-made room. The access-recovery path handles the user-facing state.
+      transport.send(buildLeavePresence(room.roomJid, room.nick));
+      failJoin(room, "other", "room-created");
       return;
     }
-    room.configuring = true;
-    clearTimer(room);
-    const gen = generation;
-    // TEMPORARY (Phase 3): the single call site of room creation.
-    void acceptInstantRoom(transport, room.roomJid, iqTimeoutMs).then((res) => {
-      // A drop and rejoin while the IQ was in flight makes this result stale.
-      if (generation !== gen || room.state !== "joining" || !room.configuring)
-        return;
-      if (rooms.get(room.roomJid) !== room) return;
-      if (res.ok) {
-        markJoined(room, true);
-      } else {
-        transport.send(buildLeavePresence(room.roomJid, room.nick));
-        failJoin(room, "room-config-failed", res.condition);
-      }
-    });
+    markJoined(room);
   }
 
-  function markJoined(room: TrackedRoom, created: boolean): void {
+  function markJoined(room: TrackedRoom): void {
     clearTimer(room);
     room.state = "joined";
-    room.configuring = false;
     room.occupants.add(room.nick);
     emit({
       type: "occupant-joined",
@@ -443,7 +428,7 @@ export function createXmppClient(
       type: "room-joined",
       roomJid: room.roomJid,
       nick: room.nick,
-      created,
+      created: false,
     });
     startHistory(room);
   }
@@ -846,7 +831,6 @@ export function createXmppClient(
         baseNick,
         nick: baseNick,
         attempt: 0,
-        configuring: false,
         occupants: new Set(),
         timer: null,
         lastSeenId: null,

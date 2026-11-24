@@ -11,6 +11,12 @@
 %%   slow          register answers ok after 7 s (longer than the client timeout)
 %%   garbage       every request is 200 with a non-JSON body
 %%   slow_check    checkPassword answers after 7 s (everything else as ok)
+%%   room_unloaded the MUC operations behave like a MongooseIM whose rooms are not loaded (same
+%%                 as ok; the default). Rooms live in ETS: set_member answers room_not_found
+%%                 until a create (which needs a registered owner) loaded the room.
+%%   owner_missing createInstantRoom always answers user_not_found
+%%   configure_mismatch changeRoomConfiguration echoes publicList flipped
+%%   slow_room     every MUC operation answers after 7 s
 %% A successful register (modes ok, exists never registers) stores {{pw, Jid}, Password} so
 %% that checkPassword can answer: equal -> correct true, different -> correct false, no entry ->
 %% 200 user_does_not_exist whose message echoes the password (the shape probed live, which is
@@ -19,7 +25,7 @@
 -behaviour(cowboy_handler).
 
 -export([start/0, stop/0, port/0, stop_listener/0, start_listener/1]).
--export([set_mode/1, reset/0, calls/0, forget_user/1]).
+-export([set_mode/1, reset/0, reset_calls/0, calls/0, forget_user/1]).
 -export([put_secret/1, secrets/0, log_event/1, log_events/0]).
 -export([init/2]).
 
@@ -73,18 +79,40 @@ stop_listener() ->
 -spec port() -> inet:port_number().
 port() -> ranch:get_port(?LISTENER).
 
--spec set_mode(ok | exists | unauthorized | http503 | slow | slow_check | garbage) -> ok.
+-type mode() ::
+    ok
+    | exists
+    | unauthorized
+    | http503
+    | slow
+    | slow_check
+    | garbage
+    | room_unloaded
+    | owner_missing
+    | configure_mismatch
+    | slow_room.
+-type op() :: register | remove | check | set_member | create | configure | exit | other.
+
+-spec set_mode(mode()) -> ok.
 set_mode(Mode) ->
     true = ets:insert(?TABLE, {mode, Mode}),
     ok.
 
-%% Forget the recorded requests (not the secrets or log events).
--spec reset() -> ok.
-reset() ->
+%% Forget the recorded requests only.
+-spec reset_calls() -> ok.
+reset_calls() ->
     ets:match_delete(?TABLE, {{call, '_'}, '_'}),
     ok.
 
--spec calls() -> [#{op := register | remove | check | other, auth := term(), vars := map()}].
+%% Forget the recorded requests and unload every room (not the secrets, log events or accounts).
+-spec reset() -> ok.
+reset() ->
+    ets:match_delete(?TABLE, {{call, '_'}, '_'}),
+    ets:match_delete(?TABLE, {{room, '_'}, '_'}),
+    ok.
+
+-spec calls() -> [#{op := op(), auth := term(), vars := map()}].
+
 calls() ->
     [Call || {{call, _}, Call} <- ets:tab2list(?TABLE)].
 
@@ -133,16 +161,17 @@ init(Req0, State) ->
     {ok, Req, State}.
 
 operation(Query) ->
-    case
-        {
-            binary:match(Query, <<"registerUser">>),
-            binary:match(Query, <<"removeUser">>),
-            binary:match(Query, <<"checkPassword">>)
-        }
-    of
-        {{_, _}, nomatch, nomatch} -> register;
-        {nomatch, {_, _}, nomatch} -> remove;
-        {nomatch, nomatch, {_, _}} -> check;
+    Names = [
+        {<<"registerUser">>, register},
+        {<<"removeUser">>, remove},
+        {<<"checkPassword">>, check},
+        {<<"setUserAffiliation">>, set_member},
+        {<<"createInstantRoom">>, create},
+        {<<"changeRoomConfiguration">>, configure},
+        {<<"exitRoom">>, exit}
+    ],
+    case [Op || {Name, Op} <- Names, binary:match(Query, Name) =/= nomatch] of
+        [Op] -> Op;
         _ -> other
     end.
 
@@ -152,6 +181,42 @@ respond(http503, _Op, _Vars, Req) ->
     cowboy_req:reply(503, #{}, <<"upstream unavailable">>, Req);
 respond(garbage, _Op, _Vars, Req) ->
     cowboy_req:reply(200, #{}, <<"<html>not json</html>">>, Req);
+respond(slow_room, Op, Vars, Req) when
+    Op =:= set_member; Op =:= create; Op =:= configure; Op =:= exit
+->
+    timer:sleep(?SLOW_MS),
+    respond(ok, Op, Vars, Req);
+respond(_Mode, set_member, #{<<"room">> := Room, <<"user">> := User}, Req) ->
+    case ets:lookup(?TABLE, {room, Room}) of
+        [] ->
+            reply(200, gql_error(<<"room_not_found">>), Req);
+        [_] ->
+            true = ets:insert(?TABLE, {{aff, Room, User}, member}),
+            reply(200, muc_data(<<"setUserAffiliation">>, <<"User affiliation set">>), Req)
+    end;
+respond(owner_missing, create, _Vars, Req) ->
+    reply(200, gql_error(<<"user_not_found">>), Req);
+respond(_Mode, create, #{<<"room">> := Room, <<"owner">> := Owner}, Req) ->
+    [Bare | _] = binary:split(Owner, <<"/">>),
+    case ets:lookup(?TABLE, {pw, Bare}) of
+        [] ->
+            reply(200, gql_error(<<"user_not_found">>), Req);
+        [_] ->
+            true = ets:insert(?TABLE, {{room, Room}, loaded}),
+            reply(200, muc_data(<<"createInstantRoom">>, #{<<"jid">> => Room}), Req)
+    end;
+respond(Mode, configure, #{<<"room">> := Room, <<"config">> := Config}, Req) ->
+    case ets:lookup(?TABLE, {room, Room}) of
+        [] ->
+            reply(200, gql_error(<<"room_not_found">>), Req);
+        [_] when Mode =:= configure_mismatch ->
+            Flipped = Config#{<<"publicList">> => not maps:get(<<"publicList">>, Config)},
+            reply(200, muc_data(<<"changeRoomConfiguration">>, Flipped), Req);
+        [_] ->
+            reply(200, muc_data(<<"changeRoomConfiguration">>, Config), Req)
+    end;
+respond(_Mode, exit, _Vars, Req) ->
+    reply(200, muc_data(<<"exitRoom">>, <<"Exit room request sent">>), Req);
 respond(exists, register, _Vars, Req) ->
     reply(200, gql_error(<<"exists">>), Req);
 respond(slow, register, Vars, Req) ->
@@ -194,6 +259,9 @@ respond(_Mode, remove, #{<<"user">> := Jid}, Req) ->
     );
 respond(_Mode, _Op, _Vars, Req) ->
     cowboy_req:reply(400, #{}, <<"unexpected">>, Req).
+
+muc_data(Field, Value) ->
+    #{<<"data">> => #{<<"muc">> => #{Field => Value}}}.
 
 check_ok(Correct) ->
     #{<<"data">> => #{<<"account">> => #{<<"checkPassword">> => #{<<"correct">> => Correct}}}}.

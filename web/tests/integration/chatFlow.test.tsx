@@ -852,6 +852,83 @@ describe('chat flow', () => {
       expect(document.activeElement).toBe(screen.getByText(AREA_TEXT.joining('Area u4pruyd')));
     }, 20_000);
 
+    describe('access recovery (ADR-020)', () => {
+      it('a refused join locates once more, rejoins and ends joined without an error', async () => {
+        const { t, requests } = mountApp({ stored: true });
+        await connectStored(t);
+        await locate();
+        expect(locateRequests(requests)).toHaveLength(1);
+        expect(joinsTo(t)).toEqual([`${CELL_ROOM}/alice`]);
+        act(() => {
+          t.pushStanza(presenceError('not-allowed', CELL_ROOM));
+        });
+        await settle();
+        expect(locateRequests(requests)).toHaveLength(2);
+        expect(joinsTo(t)).toEqual([`${CELL_ROOM}/alice`, `${CELL_ROOM}/alice`]);
+        expect(screen.getByText(AREA_TEXT.joining('Area u4pruyd'))).toBeInTheDocument();
+        expect(screen.queryByText(AREA_TEXT.accessDenied)).toBeNull();
+        expect(screen.queryByRole('button', { name: AREA_TEXT.rejoin })).toBeNull();
+        act(() => {
+          t.pushStanza(presence('alice', ['110']));
+        });
+        expect(screen.getByText(/You're in/)).toHaveTextContent("You're in Area u4pruyd as alice");
+        expect(screen.queryByText(AREA_TEXT.accessDenied)).toBeNull();
+        expect(locateRequests(requests)).toHaveLength(2);
+      }, 20_000);
+
+      it('a second refusal stops: a clear message and a keyboard-reachable Try again that locates and rejoins', async () => {
+        const { t, requests } = mountApp({ stored: true });
+        const user = userEvent.setup({ delay: null });
+        await connectStored(t);
+        await locate();
+        act(() => {
+          t.pushStanza(presenceError('registration-required', CELL_ROOM));
+        });
+        await settle();
+        act(() => {
+          t.pushStanza(presenceError('registration-required', CELL_ROOM));
+        });
+        await settle();
+        // No loop: one automatic recovery, then the user decides.
+        expect(locateRequests(requests)).toHaveLength(2);
+        expect(joinsTo(t)).toHaveLength(2);
+        const status = screen.getByText(AREA_TEXT.accessDenied);
+        expect(status).toHaveAttribute('role', 'status');
+        expect(screen.queryByRole('button', { name: AREA_TEXT.rejoin })).toBeNull();
+        const retry = screen.getByRole('button', { name: AREA_TEXT.accessRetry });
+        for (const s of screen.getAllByRole('status')) {
+          expect(within(s).queryByRole('button')).toBeNull();
+        }
+        // Keyboard: reachable by Tab and activated with Enter.
+        for (let i = 0; i < 40 && document.activeElement !== retry; i += 1) await user.tab();
+        expect(document.activeElement).toBe(retry);
+        await user.keyboard('{Enter}');
+        expect(screen.queryByRole('button', { name: AREA_TEXT.accessRetry })).toBeNull();
+        expect(document.activeElement).toBe(screen.getByText(AREA_TEXT.joining('Area u4pruyd')));
+        await settle();
+        expect(locateRequests(requests)).toHaveLength(3);
+        expect(joinsTo(t)).toHaveLength(3);
+        act(() => {
+          t.pushStanza(presence('alice', ['110']));
+        });
+        expect(screen.getByText(/You're in/)).toBeInTheDocument();
+        expect(locateRequests(requests)).toHaveLength(3);
+      }, 30_000);
+
+      it('other join failures keep "Join again" and never locate again', async () => {
+        const { t, requests } = mountApp({ stored: true });
+        await connectStored(t);
+        await locate();
+        act(() => {
+          t.pushStanza(presenceError('forbidden', CELL_ROOM));
+        });
+        await settle();
+        expect(locateRequests(requests)).toHaveLength(1);
+        expect(screen.getByRole('button', { name: AREA_TEXT.rejoin })).toBeInTheDocument();
+        expect(screen.queryByText(AREA_TEXT.accessDenied)).toBeNull();
+      }, 20_000);
+    });
+
     it('after leaving the room the status line says so', async () => {
       const { t } = mountApp({ stored: true });
       await signInAndJoin(t);

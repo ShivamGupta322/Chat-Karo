@@ -59,19 +59,35 @@ Carry-forward for the next slices (from the 2a/2a+ reviews):
 - [x] MongoDB pool + `geo_store`; `init-indexes.js` (slice 3b, ADR-016: supervised driver topology, `/api/ready`, rooms upsert)
 - [x] Slice 3b.1: reap leaked Mongo heartbeat connections on a hung server (ADR-016 quirk 10, verified live 2026-11-21)
 - [x] MongooseIM admin API integration: register users (slice 3c, ADR-017, verified live 2026-11-21)
-- [ ] Lock down MUC: `default_room.public = false` (a public disco listing of geohash rooms would reveal
+- [x] Lock down MUC: `default_room.public = false` (a public disco listing of geohash rooms would reveal
       which cells are active, a location leak) and restrict room creation to geo_service/admin
+      (slice 3f-1, ADR-020, verified live 2026-11-23: members-only rooms, membership granted by `/api/locate`)
+- [ ] Slice 3f-2: revoke the old room's membership on move (supervised ETS owner of user → last room; set the old
+      room to NONE after the new grant), and decide what to do with memberships already in `muc_room_aff`
+- [ ] Slice 3g: opaque room names (keyed hash of the cell) to close the ADR-020 residuals: stored room names listed
+      by disco after a MongooseIM restart, occupant counts via room disco#info, the room-existence oracle
 - [x] Slice 3e-1: `POST /api/session/renew` (server, ADR-019, verified live 2026-11-21)
 - [x] Slice 3e-2: client identity (Welcome, device credential, token manager; verified live 2026-11-21)
 - [x] Client switches to `/api/locate` for room assignment (3e-3: only the cell centre is sent, server-assigned rooms, ADR-019, verified live 2026-11-22)
 - **Demo:** rooms assigned by the server, recorded in MongoDB. Verified live 2026-11-22 (ADR-019 "Live evidence (3e-3)");
-  the phase closes once the MUC lockdown (3f) lands.
+  the phase closes once the MUC lockdown follow-ups (3f-2, 3g) land.
 
 Carry-forward from 3e-3:
 - Hidden-tab reconnects leave stream-management nick ghosts (`name-2`) until the old session times out. Resume the
   XEP-0198 stream on reconnect, or shorten the resumption timeout (reconnect area, ADR-010).
 - Non-blocking review suggestions: make the unreachable `aborted` branch in `geo/roomAssigner.ts` a plain return; key Chat's
   "Share your location" empty text on `cell === null` (one-frame flicker); export `browserTimers` from `api/` like `browserOnline`.
+
+Carry-forward from 3f-1 (ADR-020):
+- Reconfigure-on-load before any future MUC room-config change (stored room options override `default_room`).
+- Phase 4: MAM purge (sender JID per room for 24 h), idle room deletion, revisit temporary rooms.
+- Phase 5: MUC nickname registration (`jabber:iq:register` to `muc.<domain>`) can block a nick in every room.
+- Phase 6: MongooseIM `loglevel = "error"` (it logs JID + room on a denied creation); MongooseIM cold-boot race when the
+  Docker daemon restarts containers (RDBMS pool start timeout); automatic lobby reload instead of re-running `dev-seed.sh`.
+- Small cleanups: run the access-recovery trigger in a layout effect (one frame of "You can't open this room." before
+  "Joining…"); validate `XMPP_ROOM_OWNER` in `entrypoint.sh`; map a rejected `locate()` to `unavailable` in `roomAssigner`;
+  drop the always-false `created` on `room-joined`; the dead 201 branch in `tools/xmpp-smoke`; stream-management ghosts
+  inflate occupant counts and hold nicknames.
 
 ## Phase 4 — Room lifecycle & movement
 - [ ] `geo_room` process per active cell with idle shutdown under `geo_room_sup`

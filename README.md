@@ -52,9 +52,14 @@ curl http://127.0.0.1:8080/api/health    # geo_service liveness (first start bui
 curl http://127.0.0.1:8080/api/ready     # readiness, 200 once Mongo answers: {"status":"ready","mongo":"up"}
 # after changing geo_service code, rebuild: plain `up -d` does not rebuild an existing image
 docker compose up -d --build geo_service
-bash infra/mongooseim/dev-seed.sh
+bash infra/mongooseim/dev-seed.sh   # alice, bob, the room-owner account and the members-only lobby; re-run it after restarting MongooseIM
 node tools/xmpp-smoke/serve.mjs
 ```
+
+MUC rooms are created only by geo_service through the room-owner account (`XMPP_ROOM_OWNER` in `.env`, default `nearby-rooms`,
+shared by the mongooseim and geo_service containers) and are members-only (ADR-020). After `docker compose restart mongooseim`
+the rooms are unloaded: members get `not-allowed` on rejoin until the web client locates again (it does so once by itself), and
+the dev lobby needs `bash infra/mongooseim/dev-seed.sh` again.
 
 Create a pseudonymous session (reserves the nickname, registers a random XMPP account, returns its password
 once plus a 1 h API token; `201` with `nickname`, `jid`, `xmpp_password`, `token`, `token_type`, `expires_in`):
