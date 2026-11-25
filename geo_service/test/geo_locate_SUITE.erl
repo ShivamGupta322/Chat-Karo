@@ -40,6 +40,16 @@
     crash_function_clause_with_args/1,
     crash_case_clause_after_store/1,
     crash_in_room_access/1,
+    move_revokes_old/1,
+    same_cell_no_revoke/1,
+    back_and_forth/1,
+    revoke_failure_still_200/1,
+    revoke_unloaded_room/1,
+    concurrent_same_user/1,
+    lock_timeout_503/1,
+    slow_user_503_releases_lock/1,
+    slow_user_does_not_block_others/1,
+    owner_restart_forgets/1,
     logs_contain_no_coordinates/1
 ]).
 %% logger handler callback
@@ -64,11 +74,28 @@
 -define(A_LNG, "10.4074419").
 -define(B_LAT, "57.6485531").
 -define(B_LNG, "10.4070917").
+%% C and D are in other cells (Paris, Berlin), for the moves.
+-define(C_LAT, "48.8566141").
+-define(C_LNG, "2.3522219").
+-define(D_LAT, "52.5200066").
+-define(D_LNG, "13.4049540").
 -define(SENTINELS, [
-    ?A_LAT, ?A_LNG, ?B_LAT, ?B_LNG, "90.0000173", "180.0000419", "57.6491999"
+    ?A_LAT,
+    ?A_LNG,
+    ?B_LAT,
+    ?B_LNG,
+    ?C_LAT,
+    ?C_LNG,
+    ?D_LAT,
+    ?D_LNG,
+    "90.0000173",
+    "180.0000419",
+    "57.6491999"
 ]).
 -define(BODY_A, <<"{\"lat\":", ?A_LAT, ",\"lng\":", ?A_LNG, "}">>).
 -define(BODY_B, <<"{\"lat\":", ?B_LAT, ",\"lng\":", ?B_LNG, "}">>).
+-define(BODY_C, <<"{\"lat\":", ?C_LAT, ",\"lng\":", ?C_LNG, "}">>).
+-define(BODY_D, <<"{\"lat\":", ?D_LAT, ",\"lng\":", ?D_LNG, "}">>).
 
 all() ->
     [
@@ -87,6 +114,16 @@ all() ->
         configure_mismatch_500,
         slow_room_503,
         non_pseudonymous_sub_401,
+        move_revokes_old,
+        same_cell_no_revoke,
+        back_and_forth,
+        revoke_failure_still_200,
+        revoke_unloaded_room,
+        concurrent_same_user,
+        lock_timeout_503,
+        slow_user_503_releases_lock,
+        slow_user_does_not_block_others,
+        owner_restart_forgets,
         {group, mongo_down},
         {group, crash_injection},
         logs_contain_no_coordinates
@@ -559,6 +596,218 @@ non_pseudonymous_sub_401(_Config) ->
     [] = geo_fake_mim:calls(),
     0 = count_rooms().
 
+%%% Revoke on move (ADR-021) ------------------------------------------------------------------
+
+%% A then C: the user ends as a member of C only; the last admin call is the revoke of A.
+move_revokes_old(_Config) ->
+    Sub = new_sub(),
+    UserJid = user_jid(Sub),
+    {200, _, BodyA} = locate_as(Sub, ?BODY_A),
+    RoomA = room_of(BodyA),
+    [RoomA] = geo_fake_mim:affs(UserJid),
+    ok = geo_fake_mim:reset_calls(),
+    {200, _, BodyC} = locate_as(Sub, ?BODY_C),
+    RoomC = room_of(BodyC),
+    true = RoomA =/= RoomC,
+    %% the 200 has the same shape as ever
+    [<<"cell">>, <<"precision">>, <<"range">>, <<"room_jid">>] =
+        lists:sort(maps:keys(json:decode(BodyC))),
+    <<"{\"cell\":\"", _/binary>> = BodyC,
+    [RoomC] = geo_fake_mim:affs(UserJid),
+    #{op := set_none, vars := #{<<"room">> := RoomA, <<"user">> := UserJid}} =
+        lists:last(geo_fake_mim:calls()),
+    {ok, RoomC} = geo_membership:current(UserJid).
+
+same_cell_no_revoke(_Config) ->
+    Sub = new_sub(),
+    {200, _, BodyA} = locate_as(Sub, ?BODY_A),
+    ok = geo_fake_mim:reset_calls(),
+    {200, _, BodyB} = locate_as(Sub, ?BODY_B),
+    BodyA = BodyB,
+    [set_member] = ops(),
+    [_] = geo_fake_mim:affs(user_jid(Sub)).
+
+back_and_forth(_Config) ->
+    Sub = new_sub(),
+    UserJid = user_jid(Sub),
+    {200, _, BodyA} = locate_as(Sub, ?BODY_A),
+    {200, _, _} = locate_as(Sub, ?BODY_C),
+    {200, _, BodyA2} = locate_as(Sub, ?BODY_A),
+    BodyA = BodyA2,
+    [RoomA] = geo_fake_mim:affs(UserJid),
+    RoomA = room_of(BodyA).
+
+%% A failed revoke never changes the answer; the next locate retries it.
+revoke_failure_still_200(_Config) ->
+    Sub = new_sub(),
+    UserJid = user_jid(Sub),
+    {200, _, BodyA} = locate_as(Sub, ?BODY_A),
+    RoomA = room_of(BodyA),
+    ok = geo_fake_mim:set_mode(none_503),
+    {200, _, BodyC} = locate_as(Sub, ?BODY_C),
+    RoomC = room_of(BodyC),
+    true = lists:sort([RoomA, RoomC]) =:= geo_fake_mim:affs(UserJid),
+    ok = geo_fake_mim:set_mode(ok),
+    ok = geo_fake_mim:reset_calls(),
+    {200, _, BodyD} = locate_as(Sub, ?BODY_D),
+    RoomD = room_of(BodyD),
+    Revoked = lists:sort([
+        Room
+     || #{op := set_none, vars := #{<<"room">> := Room}} <- geo_fake_mim:calls()
+    ]),
+    Revoked = lists:sort([RoomA, RoomC]),
+    [RoomD] = geo_fake_mim:affs(UserJid).
+
+%% After a MongooseIM restart the old room is not loaded: it is loaded again, then revoked.
+revoke_unloaded_room(_Config) ->
+    Sub = new_sub(),
+    UserJid = user_jid(Sub),
+    {200, _, BodyA} = locate_as(Sub, ?BODY_A),
+    RoomA = room_of(BodyA),
+    ok = geo_fake_mim:reset(),
+    {200, _, BodyC} = locate_as(Sub, ?BODY_C),
+    RoomC = room_of(BodyC),
+    [set_member, create, configure, exit, set_member, set_none, create, configure, exit, set_none] =
+        ops(),
+    [#{vars := #{<<"room">> := RoomA}}, #{vars := #{<<"room">> := RoomA}}] =
+        [Call || #{op := set_none} = Call <- geo_fake_mim:calls()],
+    [RoomC] = geo_fake_mim:affs(UserJid).
+
+%% Two simultaneous locates for one account run one after the other: both are 200 and the user
+%% ends in exactly one room, the one of the request that finished last.
+concurrent_same_user(_Config) ->
+    %% load both rooms first, so that only the 1 s set_member delay is measured
+    {200, _, _} = locate_as(new_sub(), ?BODY_A),
+    {200, _, _} = locate_as(new_sub(), ?BODY_C),
+    Sub = new_sub(),
+    UserJid = user_jid(Sub),
+    ok = geo_fake_mim:set_mode(slow_member),
+    Parent = self(),
+    Start = erlang:monotonic_time(millisecond),
+    Run = fun(Tag, Body) ->
+        spawn(fun() ->
+            Result = locate_as(Sub, Body),
+            Parent ! {Tag, erlang:monotonic_time(millisecond), Result}
+        end)
+    end,
+    Run(first, ?BODY_A),
+    timer:sleep(50),
+    Run(second, ?BODY_C),
+    [{T1, R1}, {T2, R2}] = [collect(Tag) || Tag <- [first, second]],
+    {200, _, B1} = R1,
+    {200, _, B2} = R2,
+    true = erlang:max(T1, T2) - Start < 4000,
+    Winner =
+        case T1 > T2 of
+            true -> room_of(B1);
+            false -> room_of(B2)
+        end,
+    [Winner] = geo_fake_mim:affs(UserJid).
+
+collect(Tag) ->
+    receive
+        {Tag, Time, Result} -> {Time, Result}
+    after 12000 -> ct:fail({no_answer, Tag})
+    end.
+
+%% Somebody holds the user's lock for longer than the deadline: 503 with retry-after, no admin
+%% call, and the waiter is gone afterwards (another user was never affected).
+lock_timeout_503(_Config) ->
+    {200, _, _} = locate_as(new_sub(), ?BODY_C),
+    Sub = new_sub(),
+    UserJid = user_jid(Sub),
+    Far = erlang:monotonic_time(millisecond) + 60000,
+    ok = geo_membership:acquire(UserJid, Far),
+    ok = geo_fake_mim:reset_calls(),
+    Start = erlang:monotonic_time(millisecond),
+    {503, H, B} = locate_as(Sub, ?BODY_C),
+    Elapsed = erlang:monotonic_time(millisecond) - Start,
+    true = Elapsed < 9000,
+    true = Elapsed > 6000,
+    <<"5">> = maps:get(<<"retry-after">>, H),
+    #{<<"error">> := <<"service_unavailable">>} = json:decode(B),
+    [] = geo_fake_mim:calls(),
+    %% another user is served at once
+    Start2 = erlang:monotonic_time(millisecond),
+    {200, _, _} = locate_as(new_sub(), ?BODY_C),
+    true = erlang:monotonic_time(millisecond) - Start2 < 2000,
+    %% the holder lets go: the user can locate again
+    ok = geo_membership:release(UserJid),
+    {200, _, _} = locate_as(Sub, ?BODY_C).
+
+%% A user whose MongooseIM calls hang fails with 503 within the deadline and leaves no lock
+%% behind: the very next locate of the same account works.
+slow_user_503_releases_lock(_Config) ->
+    {200, _, _} = locate_as(new_sub(), ?BODY_C),
+    Sub = new_sub(),
+    ok = geo_fake_mim:set_mode({slow_for, user_jid(Sub)}),
+    Start = erlang:monotonic_time(millisecond),
+    {503, H, _} = locate_as(Sub, ?BODY_C),
+    true = erlang:monotonic_time(millisecond) - Start < 9000,
+    <<"5">> = maps:get(<<"retry-after">>, H),
+    ok = geo_fake_mim:set_mode(ok),
+    Start2 = erlang:monotonic_time(millisecond),
+    {200, _, _} = locate_as(Sub, ?BODY_C),
+    true = erlang:monotonic_time(millisecond) - Start2 < 2000.
+
+%% One user's hung MongooseIM call must not delay anyone else (no shared HTTP keep-alive queue).
+slow_user_does_not_block_others(_Config) ->
+    {200, _, _} = locate_as(new_sub(), ?BODY_C),
+    Slow = new_sub(),
+    Other = new_sub(),
+    ok = geo_fake_mim:set_mode({slow_for, user_jid(Slow)}),
+    Self = self(),
+    _ = spawn_link(fun() -> Self ! {slow_done, locate_as(Slow, ?BODY_C)} end),
+    timer:sleep(300),
+    Start = erlang:monotonic_time(millisecond),
+    {200, _, _} = locate_as(Other, ?BODY_C),
+    Elapsed = erlang:monotonic_time(millisecond) - Start,
+    ct:pal("other user's locate took ~p ms while another user's call hung", [Elapsed]),
+    ok = geo_fake_mim:set_mode(ok),
+    receive
+        {slow_done, {503, _, _}} -> ok
+    after 10000 -> ct:fail(slow_user_never_finished)
+    end,
+    true = Elapsed < 2000.
+
+%% The tracker lost its table: the next move cannot revoke what it forgot, but still answers 200.
+owner_restart_forgets(_Config) ->
+    Sub = new_sub(),
+    UserJid = user_jid(Sub),
+    {200, _, BodyA} = locate_as(Sub, ?BODY_A),
+    Old = whereis(geo_membership),
+    true = is_pid(Old),
+    exit(Old, kill),
+    New = wait_restarted(Old, 50),
+    true = New =/= Old,
+    ok = geo_fake_mim:reset_calls(),
+    {200, _, BodyC} = locate_as(Sub, ?BODY_C),
+    [] = [Op || Op <- ops(), Op =:= set_none],
+    true = lists:sort([room_of(BodyA), room_of(BodyC)]) =:= geo_fake_mim:affs(UserJid),
+    {ok, RoomC1} = geo_membership:current(UserJid),
+    RoomC1 = room_of(BodyC),
+    {_, New, worker, _} = lists:keyfind(
+        geo_membership, 1, supervisor:which_children(geo_service_sup)
+    ).
+
+wait_restarted(_Old, 0) ->
+    ct:fail(geo_membership_not_restarted);
+wait_restarted(Old, N) ->
+    case whereis(geo_membership) of
+        Pid when is_pid(Pid), Pid =/= Old ->
+            Pid;
+        _ ->
+            timer:sleep(100),
+            wait_restarted(Old, N - 1)
+    end.
+
+room_of(Body) ->
+    #{<<"room_jid">> := RoomJid} = json:decode(Body),
+    RoomJid.
+
+user_jid(Sub) ->
+    <<Sub/binary, "@", ?DOMAIN>>.
+
 %% (a) the "after decoding" crash: the exception reason carries the decoded body.
 crash_in_cell_for(Config) ->
     ok = meck:new(geo_locate, [passthrough]),
@@ -622,14 +871,14 @@ crash_case_clause_after_store(Config) ->
 %% (d) the access step crashes with the user and room in the reason.
 crash_in_room_access(Config) ->
     ok = meck:new(geo_room_access, [passthrough]),
-    ok = meck:expect(geo_room_access, grant, fun(_Ctx, Room, User) ->
+    ok = meck:expect(geo_room_access, assign, fun(_Ctx, Room, User) ->
         meck:exception(error, {injected, Room, User})
     end),
     {500, _, B} = locate(?BODY_A),
     #{<<"error">> := <<"internal_error">>} = json:decode(B),
     timer:sleep(300),
     #{class := error, reason := injected} = one_crash(Config),
-    1 = meck:num_calls(geo_room_access, grant, '_'),
+    1 = meck:num_calls(geo_room_access, assign, '_'),
     no_leak(Config),
     nomatch = re_find(printed(events_since(Config)), "g7_u4pruyd"),
     nomatch = re_find(printed(events_since(Config)), "u[0-9a-f]{32}").
@@ -654,6 +903,13 @@ logs_contain_no_coordinates(_Config) ->
     Names = [Name || #{msg := {report, #{event := Name}}} <- Events, is_locate(Name)],
     true = lists:member(locate_crashed, Names),
     [locate_crashed] = lists:usort(Names),
+    %% No revoke or tracking failure was logged by any case (they are all silent or recovered).
+    [] = [
+        Name
+     || #{msg := {report, #{event := Name}}} <- Events,
+        is_atom(Name),
+        Name =:= room_revoke_failed orelse lists:prefix("membership_", atom_to_list(Name))
+    ],
     %% Neither a room JID nor a pseudonymous subject is ever logged.
     lists:foreach(
         fun(T) ->

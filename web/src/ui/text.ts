@@ -152,6 +152,8 @@ export const AREA_TEXT = {
   switchArea: 'Switch to my new area',
   joining: (label: string): string => `Joining ${label}…`,
   rejoin: 'Join again',
+  moving: "Moving you to your new area's chat…",
+  removed: "You're no longer in this area's chat. Nearby may be open in another tab.",
   accessDenied: "Nearby couldn't let you into this area's chat.",
   accessRetry: 'Try again',
   emptyNoArea: 'Share your location to chat with people nearby.',

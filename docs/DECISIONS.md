@@ -1215,13 +1215,13 @@ that case fails, so the test is not vacuous.
 ---
 
 ## ADR-020 — MUC lockdown: server-created, members-only, unlisted rooms
-**Status:** Accepted (Phase 3, slice 3f-1, 2026-11-23). Amends ADR-008 (no client room creation), ADR-011 (MAM access in members-only rooms) and ADR-013 ("anyone can join any `g7_` room" and the room-disco leak).
+**Status:** Accepted (Phase 3, slice 3f-1, 2026-11-23). Amends ADR-008 (no client room creation), ADR-011 (MAM access in members-only rooms) and ADR-013 ("anyone can join any `g7_` room" and the room-disco leak). **Amended by ADR-021 (3f-2): the previous room's membership is revoked on a move (D3-A resolved).**
 **Context:** Until now any client could create and join any `g7_*` room: `access_create` allowed every local user, rooms were public and listed, and the web client sent the instant-room `muc#owner` IQ on a 201. MAM of an open room is readable by anyone not outcast without joining. The location product needs "you can only be in the room of the cell you located into".
 
 **Decisions (user, 2026-11-23):**
 - **D1-A members-only.** Rooms are members-only; geo_service grants `member` per successful `POST /api/locate`. (B, open but unlisted, would let anyone join any cell and read its 24 h MAM.)
 - **D2-A persistent rooms** (as before). Temporary rooms are fragile (`exitRoom` destroys them) and are revisited with Phase 4.
-- **D3-A no membership revoke in this slice.** Revoke-on-move (supervised ETS owner of user to last room, set the old room NONE after the new grant) is slice 3f-2, right after. Memberships accumulate in PostgreSQL until then.
+- **D3-A no membership revoke in this slice.** Revoke-on-move (supervised ETS owner of user to last room, set the old room NONE after the new grant) is slice 3f-2, right after. Memberships accumulate in PostgreSQL until then. **Resolved by ADR-021 (3f-2).**
 - **D4-A keep `g7_<geohash>` names** for now. Opaque HMAC-derived names are slice 3g, before Phase 3 closes.
 - **D5-A delete the 10 existing MUC rooms and their affiliations** (done by the orchestrator before this slice; lobby is re-seeded; MAM rows stay). Counts are recorded under Live evidence.
 - **D6-A accept MongooseIM warning logs in dev** (a denied creation logs `check_user_can_create_room_failed` with the JID and room at warning); `loglevel = "error"` in Phase 6 production.
@@ -1247,7 +1247,7 @@ that case fails, so the test is not vacuous.
 
 **Residuals (do not claim "cells are hidden" until slice 3g):**
 - With deterministic `g7_<geohash>` names: after a MongooseIM restart disco#items lists the stored room names; room disco#info exposes the live occupant count; whether a cell room exists is an oracle.
-- Memberships accumulate in PostgreSQL until slice 3f-2, and MAM keeps the sender JID per room for 24 h (Phase 4 purge).
+- ~~Memberships accumulate in PostgreSQL until slice 3f-2~~: **see ADR-021** (the previous room is revoked on a move; the residual there is a restart of geo_service until slice 3f-3). MAM keeps the sender JID per room for 24 h (Phase 4 purge).
 - Concurrent first locates of one cell may double-create; the owner's join and expulsion are briefly visible. Accepted.
 - MUC nickname registration (`jabber:iq:register` to `muc.<domain>`) blocks a nick in every room, so the client falls back to `Name-2`. Follow-up (Phase 5).
 - MongooseIM logs the JID and room on a denied creation (D6).
@@ -1320,3 +1320,89 @@ background page, so actions were driven by in-page script), all four services he
 - AC15: `g7_u4pruyd` and `g7_u4pruye` loaded through the owner and deleted; the three test accounts removed; their profiles and
   the two Mongo room docs deleted. Left: `muc_rooms` = lobby (alice, bob members; nearby-rooms owner); `listUsers` = alice, bob,
   nearby-rooms and the owner's two own accounts; browser storage empty.
+
+## ADR-021 — Revoke the old room's membership on move
+**Status:** Accepted (Phase 3, slice 3f-2, 2026-11-24). Resolves ADR-020 decision D3-A and its "memberships accumulate" residual. Builds on ADR-016 (supervision), ADR-017 (admin client: constant documents, bodies never logged), ADR-018 (guarded handler), ADR-019 (keep-room window, bundle) and ADR-020 (grant, deadline, failure mapping).
+**Context:** Rooms are members-only and every successful `POST /api/locate` made the caller a `member` of the cell's room, but nothing took the membership away. A user who walked through ten cells stayed a member (and could rejoin, and read the 24 h MAM) of all ten. The product rule is "you are in the room of the cell you are in".
+
+**Decisions (user, 2026-11-24):**
+- **U1-A restart residual: ETS now.** The user to room mapping lives in ETS. A restart of geo_service forgets it; slice 3f-3 ("membership reconciliation on start": Mongo `rooms` x `listRoomAffiliations`, pending revokes, loaded rooms only) follows right after. Until then at most one stale membership per user who moves after a restart. Do not claim "one membership per user" unconditionally before 3f-3.
+- **U2-A last membership kept.** The membership of the room the user is in stays after sign-out, location off or "Start over", until their next move. Phase 4 adds membership expiry (N hours after the last locate) and idle room deletion. No `POST /api/leave` now.
+- **U3-A same identity, two tabs, different cells (dev picker only).** Last locate wins. The older tab shows "removed" plus "Join again"; there is no automatic re-locate (an automatic re-locate would ping-pong between the tabs).
+
+**Decision:**
+1. **`geo_membership` (new, supervised) owns the mapping and the per-user lock.** A `gen_server` under `geo_service_sup` (child between `geo_mongo_sup` and `geo_http`, `permanent`, shutdown 5000, registered name `geo_membership`) owns the ETS table `geo_membership` (`protected, named_table, set, {read_concurrency, true}`) with rows `{UserJid, Current, Pending}`. `Current` is the room of the user's last successful locate; `Pending` are rooms whose revoke failed (no duplicates, never `Current`, at most 16 per user: the oldest is dropped with one atom-only `membership_pending_dropped` warning carrying a count). Rejected: MongooseIM (no per-user room query exists, see facts), reading Postgres directly (new dependency, internal credentials and schema coupling), a field on the Mongo profile (U1-C: a durable user-to-cell link in the application database).
+2. **`geo_room_access:assign/3` replaces `grant/3` in the locate handler** (`grant/3` is unchanged and is called by `assign/3`). Under the existing 8 s deadline: acquire the user's lock (waiting counts against the deadline; no lock in time is `{error, unavailable}`, so 503 with `retry-after: 5`) -> grant (unchanged) -> `geo_membership:settle/2` (records the new room, returns old current plus pending, minus the new room) -> revoke each -> requeue the failures -> release (in an `after`) -> reply. A grant failure does no settle and no revoke.
+   - **Revoke before the reply** ("200 means the old membership is revoked or queued for retry"). Setting the affiliation to NONE makes the room kick the user with status 321, so the 321 can reach the client in its keep-room window.
+   - **A revoke failure never changes the response.** The room is requeued and retried on the user's next locate. `unavailable` (MongooseIM down, timeout, deadline nearly spent) is requeued silently; anything else logs one `room_revoke_failed` with atoms only (`step`, `reason`).
+   - **An unloaded old room** (`room_not_found`, e.g. after a MongooseIM restart): load it exactly like the grant slow path (create as the owner, configure, owner exits) and revoke again; a second `room_not_found` is a failure. Below `MIN_CALL_MS` (250 ms) no call is made and the room goes back to pending.
+   - **Same-room locate** revokes nothing but retries pending revokes.
+3. **Per-user lock** held across grant, settle and revoke (otherwise A then B then A could kick the user from the room they just entered). FIFO per user, at most 4 waiters (a 5th gets `{error, busy}` at once), the holder is monitored (a crash releases the lock), a waiter whose call timed out sends a `cancel` (which also releases the lock if it was granted at that very moment). Different users never block each other. `handle_call` does only map and ETS work; every admin call is made by the request process.
+4. **Tracking failures are not locate failures.** `acquire` failing (owner down, timeout, deadline) is `busy`, answered as `unavailable`. `settle` or `requeue` failing (owner down) means tracking is lost: the locate still answers 200, no revoke is attempted, and one `membership_tracking_failed` warning (no fields) is logged. Restarting the owner empties the table (the same residual as U1-A).
+5. **The lobby and any other non-cell room are never touched.** The tracker records only `/api/locate` rooms, and `geo_room_access:revoke/3` refuses any room whose local part fails `geo_cell:parse_room_id/1` or whose domain is not the MUC domain: no admin call, one `room_revoke_failed` with `step => guard`, `reason => not_a_cell_room`. The locate handler already admits only `u` + 32 hex subjects, so alice, bob and the room owner are excluded.
+6. **Privacy of the owner process.** Its state and messages hold user to room links, which are as sensitive as user to cell. Nothing in it logs, its public functions wrap `gen_server:call/3` in `try ... catch exit:_` (the exit reason of a failed call embeds the request, so it is never logged), every callback is wrapped so an unexpected failure exits with the bare atom `membership_failed` (no arguments, no stack with values), and it implements `format_status/1` (the OTP 25+ status-map form): the state becomes counts (`rows`, `locks`), `message` and `reason` become `redacted`, `log` is empty. Tests: `sys:get_status/1` and a forced crash contain no user JID and no room.
+7. **Web client.** The 321 is part of moving, never a failure. `LeaveReason` gains `removed`. A self presence of type unavailable with status 321 (the kick has no status 110, so self is recognised by the nick) in a joined room emits `room-left` with reason `removed`, and the same presence while joining emits `room-left` `removed` instead of `room-join-failed`. `Chat` shows "Moving you to your new area's chat…" without a button while a new assignment is pending (the old room is kept in the window), otherwise "You're no longer in this area's chat. Nearby may be open in another tab." with the existing "Join again". Nothing else triggers a locate: `useAccessRecovery` is unchanged (a `removed` leave is not an access failure), and a refused "Join again" goes through its existing single refresh and join.
+8. **Existing memberships.** None in dev (`muc_room_aff` held the lobby's three rows and no `g7_` rows), so no migration. If a database ever holds old cell-room memberships, remove them by hand: stop mongooseim, run `DELETE FROM muc_room_aff WHERE aff = 2 AND room_id IN (SELECT id FROM muc_rooms WHERE muc_host = 'muc.<domain>' AND room_name LIKE 'g7\_%');` (`aff = 2` is member), start mongooseim.
+9. **Long-term cleanup is Phase 4:** membership expiry (supervised worker, needs timestamps in the table), idle room deletion (also purges MAM; it must drop the room from every tracker entry, otherwise load-to-revoke would recreate it), account deletion must revoke before `removeUser`, and `geo_rate` should align with this table.
+
+**Verified facts (MongooseIM 6.2.1; release source in the container, read-only psql):**
+1. There is no per-user room-affiliation query: `priv/graphql/schemas/admin/muc.gql` has `listRooms`, `getRoomConfig`, `listRoomUsers`, `listRoomAffiliations(room, affiliation)` and `getRoomMessages`; `listUserRooms` exists only in `admin/muc_light.gql` (unused module). `listRoomAffiliations` sees loaded rooms only (`mod_muc_api.erl:305-314`, `room_users_aff/1` :555).
+2. `NONE` is a `MUCAffiliation` (`global/muc.gql`). `setUserAffiliation` calls `mod_muc_api:set_affiliation/3` (:316-338) as the room's first owner and works on loaded rooms only (`mod_muc:room_jid_to_pid/1`, `mod_muc.erl:920-929`, no restore): an unloaded room answers `room_not_found`.
+3. member to none in a members-only room (`mod_muc_room.erl:2832-2841`) calls `safe_send_kickban_presence(JID, Reason, <<"321">>, none, SD)`, removes the affiliation and the role. none to none is an ok no-op (`can_change_aff/3` :3033).
+4. The kick presence (:3114-3170) comes from `room/<nick>`, `type="unavailable"`, `<x xmlns=muc#user><item affiliation="none" role="none"/><status code="321"/></x>`, **without status 110**; it goes to every occupant including the removed one, and a bare JID matches all of that user's sessions (`foreach_matched_user/3` :2181-2196), so session-management ghosts are removed too.
+5. `set_affiliation(_, none, _)` removes the entry (:1406-1414); `save_persistent_room_state/1` (:966) calls `mod_muc_rdbms:store_room/4` (:126-135), which rewrites the room and all its affiliations in one transaction, so NONE deletes the `muc_room_aff` row (and each revoke changes the room's `muc_rooms.id`; MAM is keyed by JID).
+6. A membership in an unloaded room is inert but persisted: MAM `can_access_room` answers `{error, not_found}` (false), a join hits the restart trap (`not-allowed`), and it revives when geo_service loads the room.
+7. `removeUser` keeps MUC affiliations (mod_muc has `remove_domain` hooks, no `remove_user`; `mod_muc_rdbms` deletes per domain only).
+8. `process_admin_items_set/4` logs `muc_admin_query` at **info** with the from JID and the target JID. `loglevel = "warning"` suppresses it; never lower it.
+9. `deleteRoom` runs `forget_room`, which deletes the room's MAM (`mod_mam_muc.erl:242-248`); `createInstantRoom` on a missing room creates it (Phase 4 relevance).
+10. Mongo: only pending profiles expire (`expiresAt`); active profiles never do. `rooms` documents expire 7 days after `lastActiveAt`; MUC rooms persist.
+
+**Admin HTTP client (decision):** `geo_xmpp_admin` uses its own `httpc` profile (`geo_xmpp_admin`), started by `geo_service_app` with `max_keep_alive_length 0` and `max_sessions 8`, so no admin request waits behind another one. On the default profile (keep-alive, `max_keep_alive_length` 5, `max_sessions` 2) a new POST is queued behind a hung in-flight request on the same session (OTP 28 inets-9.6.2: `httpc_manager.erl:763-865`, `httpc_handler.erl:398-418`, `610-641`, `1179-1190`, `httpc_internal.hrl:37-42`), which delayed every other user by up to the 5 s call timeout (measured 2744 ms vs 9 ms). Regression case: `geo_locate_SUITE:slow_user_does_not_block_others`. `max_sessions 8` limits only the persistent connections; beyond it httpc opens extra one-off `Connection: close` connections, without a limit (`httpc_manager.erl:776-782`).
+
+**Residuals:**
+- The profile options live only in the running `httpc_manager`; inets restarts a crashed manager without them (`httpc_profile_sup.erl:107`), so after such a crash the profile falls back to the defaults and the cross-user queuing returns (still bounded by the 5 s call timeout) until geo_service restarts. Follow-up: re-apply the options when the manager restarts.
+- A restart of geo_service forgets the table: at most one stale membership per user who moves afterwards, until slice 3f-3.
+- The last membership stays until the next move (U2-A); Phase 4 expiry.
+- Same identity in two tabs with different dev-picker cells: the last locate wins (U3-A).
+- Each revoke rewrites the room row and its affiliations. A revoke after a MongooseIM restart adds up to four admin calls (load, then set NONE), all within the 8 s deadline; lock waits end in 503, not in a hang.
+- The ETS table grows by one row (about 200 bytes) per user since start; Phase 4 expiry bounds it.
+- "Join again" after `removed` may briefly show "You can't open this room." (known carry-forward from ADR-020).
+- Opaque room names (3g) and the disco/occupant-count oracle are unchanged.
+
+**Consequences:**
+- `/api/locate` can now wait up to the 8 s deadline for the user's own earlier locate, and answers 503 when it cannot get the lock. The 200 body and the 401/400/500 shapes are unchanged.
+- New files: `geo_membership.erl`; `geo_xmpp_admin` gains `set_none/4` (+ `set_none_request/3`, `parse_set_none/2`); `geo_room_access` gains `assign/3`, `revoke/3` and the extracted `load_room/3`; `geo_http_locate` calls `assign/3` and passes `muc_domain` in the context. New log events (atoms and counts only): `room_revoke_failed`, `membership_tracking_failed`, `membership_pending_dropped`.
+- Test double: `geo_fake_mim` handles `setUserAffiliation` NONE, keeps affiliations across `reset/0` (a MongooseIM restart), and has the modes `none_503`, `slow_member` and `{slow_for, UserJid}`.
+- Proposed CLAUDE.md additions (user-owned): "A user is a member of at most one cell room; every path that grants MUC membership goes through `geo_room_access:assign/3`." "MongooseIM `loglevel` must stay `warning` or stricter: at info it logs user JID and room on affiliation changes." "`removeUser` does not remove MUC affiliations in 6.2.1: revoke memberships before deleting an account." "Processes whose state or messages hold user-to-room or user-to-cell data implement `format_status/1`."
+
+### Live evidence (3f-2)
+**2026-11-25, rebuilt geo_service image, all four services healthy; API + XMPP driven by a scratchpad script with a fresh
+`/api/session` identity (credentials in a scratchpad file, never printed, deleted afterwards), browser checks in the in-app pane
+driven by in-page script (the pane ran as a background page):**
+- AC7 (old room is shut): locate A → 200, join A, message echoed; locate B → 200 in 1.4 s (B was new, slow path). The script then
+  received, for its A nick: `<presence from='<roomA>/mover_a' to='<user>@chaterl.localhost/mover' type='unavailable'><x
+  xmlns='http://jabber.org/protocol/muc#user'><item affiliation='none' role='none'/><status code='321'/></x></presence>` (no
+  110, as fact 4 says). MAM query to A → `not-allowed`, 0 messages; join A → `registration-required`.
+- AC6 (one membership): after A → B, `listRoomAffiliations` A = nearby-rooms OWNER only; B = nearby-rooms OWNER + the user
+  MEMBER; `muc_room_aff` rows for that user = 1. After A → B → B again: still 1. Round 2 (2026-11-25, image with the dedicated
+  httpc profile), a fresh identity A → B → A → B: after every step exactly one room lists the user and its `muc_room_aff` count is 1.
+- AC10 (geo_service restart, the U1 residual): user a member of B; `docker compose restart geo_service`; move to C → 200, B still
+  lists the user (2 rows: B and C), as expected until 3f-3; move to A → C revoked, B still listed. RestartCount 0, 0 `locate_crashed`.
+- AC11 (MongooseIM restart, load-to-revoke): user a member of A (and the stale B); `docker compose restart mongooseim` → all three
+  rooms unloaded; locate B with the same token → 200; A was loaded through the owner and revoked (`listRoomAffiliations` A = owner
+  only), `listRoomUsers` A = `[]` (no owner ghost); the user is back to 1 row (B is the current room, so the stale B became current).
+- AC8 (keep-room window, two identities `move_one`/`move_two` at A): tab 1 picks B → exactly 1 `/api/locate` 200, received the 321
+  for A, sent no stanza to A afterwards (its only presence was the join of `g7_u4pruye`). Every `role=status` text seen during the
+  move: "Finding the chat for Area u4pruye…", "You're in Area u4pruyd as move_one", "Moving you to your new area's chat…",
+  "Joining Area u4pruye…", "You're in Area u4pruye as move_one", "Loading recent messages…": no "Join again", no "You left the
+  room". Tab 2 showed "move_one left". 0 new locates in either tab over the next 2 minutes.
+- AC9 (same identity `m1` in a second tab, picks C): the older tab showed "You're no longer in this area's chat. Nearby may be open
+  in another tab." with "Join again"; 0 automatic locates in any tab over 2 minutes (no ping-pong). "Join again" → join refused
+  `registration-required` → exactly one `/api/locate` 200 → joined B; the newer tab then showed the removed text, with no locate.
+- AC5 / lobby: `muc_room_aff` for `lobby` unchanged after all tests (alice member, bob member, nearby-rooms owner).
+- AC12 (logs): geo_service (155 lines) 0 hits for the A/B/C cell-centre digits, `g7_`, `eyJ`, `xp1_`, `room_revoke_failed`,
+  `membership_`, `locate_crashed`; the test localpart appears only in its `session_created` line (ADR-017). MongooseIM:
+  `muc_admin_query` 0, `muc_send_kickban_presence_failed` 0.
+- AC13 (cleanup): the three test rooms loaded through the owner and deleted, the three test accounts removed, their profiles and the
+  Mongo room docs deleted; `muc_room_aff` = the three lobby rows; `listUsers` = alice, bob, nearby-rooms and the owner's two own
+  accounts; browser storage empty.

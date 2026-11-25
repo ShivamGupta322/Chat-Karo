@@ -6,10 +6,13 @@
 -export([log/2]).
 
 -define(ROOM, <<"g7_u4pruyd@muc.chaterl.localhost">>).
+-define(ROOM_B, <<"g7_u4pruyg@muc.chaterl.localhost">>).
+-define(OLD, <<"g7_u4pruyf@muc.chaterl.localhost">>).
 -define(USER, <<"u0123456789abcdef0123456789abcdef@chaterl.localhost">>).
 -define(OWNER_JID, <<"nearby-rooms@chaterl.localhost/geo_service">>).
 -define(HANDLER, geo_room_access_test_capture).
 -define(TABLE, geo_room_access_test_log).
+-define(TRACE, geo_room_access_test_trace).
 
 room_access_test_() ->
     {foreach, fun setup/0, fun teardown/1, [
@@ -31,24 +34,49 @@ room_access_test_() ->
         fun deadline_nearly_spent/0,
         fun timeouts_shrink/0,
         fun deadline_runs_out_mid_slow_path/0,
-        fun logs_are_atoms_only/0
+        fun logs_are_atoms_only/0,
+        fun assign_fast_move/0,
+        fun assign_same_room_no_revoke/0,
+        fun assign_revoke_unloaded_room/0,
+        fun assign_revoke_unavailable_requeues_silently/0,
+        fun assign_revoke_bad_response_requeues_and_logs_once/0,
+        fun assign_deadline_spent_after_grant/0,
+        fun assign_grant_failed_no_settle/0,
+        fun assign_grant_unavailable_no_settle/0,
+        fun assign_acquire_busy/0,
+        fun assign_settle_unavailable/0,
+        fun assign_requeue_unavailable/0,
+        fun assign_releases_when_grant_raises/0,
+        fun revoke_guard_non_cell_room/0,
+        fun revoke_guard_foreign_domain/0,
+        fun assign_guard_failure_dropped_not_requeued/0,
+        fun assign_revoke_crash_still_ok_and_requeues/0
     ]}.
 
 setup() ->
     ok = meck:new(geo_xmpp_admin, []),
     ok = meck:new(geo_session, [passthrough]),
+    ok = meck:new(geo_membership, []),
     ?TABLE = ets:new(?TABLE, [named_table, public, bag]),
+    ?TRACE = ets:new(?TRACE, [named_table, public, ordered_set]),
     ok = logger:add_handler(?HANDLER, ?MODULE, #{level => all}),
     ok.
 
 teardown(_) ->
     _ = logger:remove_handler(?HANDLER),
     ets:delete(?TABLE),
+    ets:delete(?TRACE),
     meck:unload(),
     ok.
 
 log(#{msg := {report, #{event := room_access_failed} = Report}}, _Config) ->
     ets:insert(?TABLE, {failed, Report}),
+    ok;
+log(#{msg := {report, #{event := room_revoke_failed} = Report}}, _Config) ->
+    ets:insert(?TABLE, {revoke, Report}),
+    ok;
+log(#{msg := {report, #{event := membership_tracking_failed} = Report}}, _Config) ->
+    ets:insert(?TABLE, {tracking, Report}),
     ok;
 log(_Event, _Config) ->
     ok.
@@ -225,12 +253,160 @@ logs_are_atoms_only() ->
     ?assertEqual([event, reason, step], lists:sort(maps:keys(Report))),
     ?assert(lists:all(fun is_atom/1, maps:values(Report))).
 
+%%% assign/3 and revoke/3 --------------------------------------------------------------------
+
+assign_fast_move() ->
+    tstub(#{settle => [{ok, [?OLD]}]}),
+    ?assertEqual(ok, geo_room_access:assign(ctx(), ?ROOM, ?USER)),
+    ?assertEqual([acquire, set_member, settle, set_none, release], trace()),
+    ?assertMatch([[_, ?ROOM, ?USER, _]], targs(set_member)),
+    ?assertMatch([[?USER, ?ROOM]], targs(settle)),
+    ?assertMatch([[_, ?OLD, ?USER, _]], targs(set_none)),
+    ?assertEqual([], revokes()),
+    ?assertEqual([], failures()).
+
+assign_same_room_no_revoke() ->
+    tstub(#{settle => [{ok, []}]}),
+    ?assertEqual(ok, geo_room_access:assign(ctx(), ?ROOM, ?USER)),
+    ?assertEqual([acquire, set_member, settle, release], trace()).
+
+assign_revoke_unloaded_room() ->
+    tstub(#{settle => [{ok, [?OLD]}], set_none => [{error, room_not_found}, ok]}),
+    ?assertEqual(ok, geo_room_access:assign(ctx(), ?ROOM, ?USER)),
+    ?assertEqual(
+        [
+            acquire,
+            set_member,
+            settle,
+            set_none,
+            create_room,
+            configure_room,
+            exit_room,
+            set_none,
+            release
+        ],
+        trace()
+    ),
+    ?assertMatch([[_, ?OLD, ?OWNER_JID, <<"Nearby">>, _]], targs(create_room)),
+    ?assertMatch([[_, ?OLD, ?OWNER_JID, <<"Nearby">>, _]], targs(exit_room)),
+    ?assertMatch([[_, ?OLD, _]], targs(configure_room)),
+    ?assertMatch([[_, ?OLD, ?USER, _], [_, ?OLD, ?USER, _]], targs(set_none)),
+    ?assertEqual([], revokes()).
+
+assign_revoke_unavailable_requeues_silently() ->
+    tstub(#{settle => [{ok, [?OLD]}], set_none => [{error, unavailable}]}),
+    ?assertEqual(ok, geo_room_access:assign(ctx(), ?ROOM, ?USER)),
+    ?assertEqual([acquire, set_member, settle, set_none, requeue, release], trace()),
+    ?assertEqual([[?USER, [?OLD]]], targs(requeue)),
+    ?assertEqual([], revokes()),
+    ?assertEqual([], tracking()),
+    ?assertEqual([], failures()).
+
+assign_revoke_bad_response_requeues_and_logs_once() ->
+    tstub(#{settle => [{ok, [?OLD]}], set_none => [{error, bad_response}]}),
+    ?assertEqual(ok, geo_room_access:assign(ctx(), ?ROOM, ?USER)),
+    ?assertEqual([[?USER, [?OLD]]], targs(requeue)),
+    [Report] = revokes(),
+    ?assertEqual([event, reason, step], lists:sort(maps:keys(Report))),
+    ?assert(lists:all(fun is_atom/1, maps:values(Report))),
+    ?assertMatch(#{event := room_revoke_failed, step := set_none, reason := bad_response}, Report),
+    ?assertEqual([], failures()).
+
+%% The grant used up the deadline: no revoke call at all, everything goes back to pending.
+assign_deadline_spent_after_grant() ->
+    tstub(#{settle => [{ok, [?OLD, ?ROOM_B]}], set_member => [{sleep_then, 300, ok}]}),
+    Ctx = (ctx())#{deadline => erlang:monotonic_time(millisecond) + 400},
+    ?assertEqual(ok, geo_room_access:assign(Ctx, ?ROOM, ?USER)),
+    ?assertEqual([acquire, set_member, settle, requeue, release], trace()),
+    ?assertEqual([[?USER, [?OLD, ?ROOM_B]]], targs(requeue)),
+    ?assertEqual([], revokes()).
+
+assign_grant_failed_no_settle() ->
+    tstub(#{set_member => [{error, bad_response}]}),
+    ?assertEqual({error, failed}, geo_room_access:assign(ctx(), ?ROOM, ?USER)),
+    ?assertEqual([acquire, set_member, release], trace()),
+    ?assertMatch([#{step := set_member, reason := bad_response}], failures()).
+
+assign_grant_unavailable_no_settle() ->
+    tstub(#{set_member => [{error, unavailable}]}),
+    ?assertEqual({error, unavailable}, geo_room_access:assign(ctx(), ?ROOM, ?USER)),
+    ?assertEqual([acquire, set_member, release], trace()).
+
+assign_acquire_busy() ->
+    tstub(#{acquire => [{error, busy}]}),
+    ?assertEqual({error, unavailable}, geo_room_access:assign(ctx(), ?ROOM, ?USER)),
+    ?assertEqual([acquire], trace()),
+    ?assertEqual([], failures()).
+
+assign_settle_unavailable() ->
+    tstub(#{settle => [{error, unavailable}]}),
+    ?assertEqual(ok, geo_room_access:assign(ctx(), ?ROOM, ?USER)),
+    ?assertEqual([acquire, set_member, settle, release], trace()),
+    ?assertEqual([#{event => membership_tracking_failed}], tracking()).
+
+assign_requeue_unavailable() ->
+    tstub(#{
+        settle => [{ok, [?OLD]}],
+        set_none => [{error, bad_response}],
+        requeue => [{error, unavailable}]
+    }),
+    ?assertEqual(ok, geo_room_access:assign(ctx(), ?ROOM, ?USER)),
+    ?assertEqual([#{event => membership_tracking_failed}], tracking()),
+    ?assertMatch([#{step := set_none}], revokes()).
+
+assign_releases_when_grant_raises() ->
+    tstub(#{set_member => [{raise, boom}]}),
+    ?assertError(boom, geo_room_access:assign(ctx(), ?ROOM, ?USER)),
+    ?assertEqual([acquire, set_member, release], trace()).
+
+revoke_guard_non_cell_room() ->
+    tstub(#{}),
+    Lobby = <<"lobby@muc.chaterl.localhost">>,
+    NotACell = <<"g9_u4pruyd@muc.chaterl.localhost">>,
+    ?assertEqual({error, failed}, geo_room_access:revoke(ctx(), Lobby, ?USER)),
+    ?assertEqual({error, failed}, geo_room_access:revoke(ctx(), NotACell, ?USER)),
+    ?assertEqual([], trace()),
+    ?assertEqual(
+        [#{event => room_revoke_failed, step => guard, reason => not_a_cell_room}],
+        lists:usort(revokes())
+    ).
+
+revoke_guard_foreign_domain() ->
+    tstub(#{}),
+    Foreign = <<"g7_u4pruyd@muc.evil.example">>,
+    ?assertEqual({error, failed}, geo_room_access:revoke(ctx(), Foreign, ?USER)),
+    ?assertEqual([], trace()),
+    ?assertMatch([#{step := guard, reason := not_a_cell_room}], revokes()).
+
+%% A guard failure is permanent: the room is dropped, not requeued (and logged once).
+assign_guard_failure_dropped_not_requeued() ->
+    Lobby = <<"lobby@muc.chaterl.localhost">>,
+    tstub(#{settle => [{ok, [Lobby, ?OLD]}], set_none => [{error, bad_response}]}),
+    ?assertEqual(ok, geo_room_access:assign(ctx(), ?ROOM, ?USER)),
+    ?assertEqual([[?USER, [?OLD]]], targs(requeue)),
+    ?assertEqual(
+        [guard, set_none],
+        [S || #{step := S} <- lists:sort(fun(#{step := A}, #{step := B}) -> A =< B end, revokes())]
+    ).
+
+%% An exception in the revoke phase never turns a successful grant into an error; the rooms not
+%% yet revoked go back on the pending list and one atom-only report is logged.
+assign_revoke_crash_still_ok_and_requeues() ->
+    tstub(#{settle => [{ok, [?OLD, ?ROOM_B]}], set_none => [{raise, boom}]}),
+    ?assertEqual(ok, geo_room_access:assign(ctx(), ?ROOM, ?USER)),
+    ?assertEqual([acquire, set_member, settle, set_none, requeue, release], trace()),
+    ?assertEqual([[?USER, [?OLD, ?ROOM_B]]], targs(requeue)),
+    [Report] = revokes(),
+    ?assertEqual(#{event => room_revoke_failed, step => crash, reason => error}, Report),
+    ?assertEqual([], failures()).
+
 %%% Helpers --------------------------------------------------------------------------------
 
 ctx() ->
     #{
         admin => #{},
         xmpp_domain => <<"chaterl.localhost">>,
+        muc_domain => <<"muc.chaterl.localhost">>,
         room_owner => <<"nearby-rooms">>,
         deadline => erlang:monotonic_time(millisecond) + 8000
     }.
@@ -264,6 +440,82 @@ calls() ->
 
 args(Fun) ->
     [Args || {_Pid, {geo_xmpp_admin, F, Args}, _Ret} <- meck:history(geo_xmpp_admin), F =:= Fun].
+
+%% Every admin and membership call in call order, with the answers popped per function (the last
+%% one repeats). An answer {sleep_then, Ms, V} sleeps first; {raise, R} raises error R.
+tstub(Answers) ->
+    Defaults = #{
+        acquire => [ok],
+        release => [ok],
+        settle => [{ok, []}],
+        requeue => [ok],
+        set_member => [ok],
+        set_none => [ok],
+        create_room => [ok],
+        configure_room => [ok],
+        exit_room => [ok],
+        register_user => [ok]
+    },
+    All = maps:merge(Defaults, Answers),
+    true = ets:insert(?TRACE, [{{answers, F}, Seq} || {F, Seq} <- maps:to_list(All)]),
+    lists:foreach(
+        fun({Mod, Fun, Arity}) -> meck:expect(Mod, Fun, traced(Fun, Arity)) end,
+        [
+            {geo_membership, acquire, 2},
+            {geo_membership, release, 1},
+            {geo_membership, settle, 2},
+            {geo_membership, requeue, 2},
+            {geo_xmpp_admin, set_member, 4},
+            {geo_xmpp_admin, set_none, 4},
+            {geo_xmpp_admin, create_room, 5},
+            {geo_xmpp_admin, configure_room, 3},
+            {geo_xmpp_admin, exit_room, 5},
+            {geo_xmpp_admin, register_user, 5}
+        ]
+    ),
+    ok.
+
+traced(Name, 1) -> fun(A) -> hit(Name, [A]) end;
+traced(Name, 2) -> fun(A, B) -> hit(Name, [A, B]) end;
+traced(Name, 3) -> fun(A, B, C) -> hit(Name, [A, B, C]) end;
+traced(Name, 4) -> fun(A, B, C, D) -> hit(Name, [A, B, C, D]) end;
+traced(Name, 5) -> fun(A, B, C, D, E) -> hit(Name, [A, B, C, D, E]) end.
+
+hit(Name, Args) ->
+    true = ets:insert(?TRACE, {{seq, erlang:unique_integer([monotonic])}, Name, Args}),
+    [{_, Seq}] = ets:lookup(?TRACE, {answers, Name}),
+    Answer = hd(Seq),
+    case tl(Seq) of
+        [] -> ok;
+        Rest -> true = ets:insert(?TRACE, {{answers, Name}, Rest})
+    end,
+    case Answer of
+        {sleep_then, Ms, Value} ->
+            timer:sleep(Ms),
+            Value;
+        {raise, Reason} ->
+            erlang:error(Reason);
+        Value ->
+            Value
+    end.
+
+trace() ->
+    [Name || {{seq, _}, Name, _} <- lists:sort(ets:match_object(?TRACE, {{seq, '_'}, '_', '_'}))].
+
+targs(Name) ->
+    [
+        Args
+     || {{seq, _}, N, Args} <- lists:sort(ets:match_object(?TRACE, {{seq, '_'}, '_', '_'})),
+        N =:= Name
+    ].
+
+revokes() ->
+    timer:sleep(20),
+    [Report || {revoke, Report} <- ets:tab2list(?TABLE)].
+
+tracking() ->
+    timer:sleep(20),
+    [Report || {tracking, Report} <- ets:tab2list(?TABLE)].
 
 failures() ->
     timer:sleep(20),

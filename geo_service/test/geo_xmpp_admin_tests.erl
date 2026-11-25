@@ -204,6 +204,9 @@ check_body(Correct) ->
 -define(SET_MEMBER_DOC,
     <<"mutation SetMember($room: BareJID!, $user: JID!) { muc { setUserAffiliation(room: $room, user: $user, affiliation: MEMBER) } }">>
 ).
+-define(SET_NONE_DOC,
+    <<"mutation SetNone($room: BareJID!, $user: JID!) { muc { setUserAffiliation(room: $room, user: $user, affiliation: NONE) } }">>
+).
 -define(CREATE_DOC,
     <<"mutation CreateRoom($room: BareJID!, $owner: JID!, $nick: ResourceName!) { muc { createInstantRoom(room: $room, owner: $owner, nick: $nick) { jid } } }">>
 ).
@@ -227,6 +230,12 @@ decoded({Url, Headers, ContentType, Body}) ->
 set_member_request_test() ->
     {Query, Variables} = decoded(geo_xmpp_admin:set_member_request(?ADMIN, ?ROOM, ?JID)),
     ?assertEqual(?SET_MEMBER_DOC, Query),
+    ?assertEqual(#{<<"room">> => ?ROOM, <<"user">> => ?JID}, Variables).
+
+set_none_request_test() ->
+    {Query, Variables} = decoded(geo_xmpp_admin:set_none_request(?ADMIN, ?ROOM, ?JID)),
+    ?assertEqual(?SET_NONE_DOC, Query),
+    ?assertEqual([<<"room">>, <<"user">>], lists:sort(maps:keys(Variables))),
     ?assertEqual(#{<<"room">> => ?ROOM, <<"user">> => ?JID}, Variables).
 
 create_room_request_test() ->
@@ -259,6 +268,7 @@ muc_documents_are_constants_test() ->
     %% No value ever lands in a query.
     Queries = [
         element(1, decoded(geo_xmpp_admin:set_member_request(?ADMIN, <<"a@b">>, <<"c@d">>))),
+        element(1, decoded(geo_xmpp_admin:set_none_request(?ADMIN, <<"a@b">>, <<"c@d">>))),
         element(
             1, decoded(geo_xmpp_admin:create_room_request(?ADMIN, <<"a@b">>, <<"c@d/e">>, <<"n">>))
         ),
@@ -304,6 +314,16 @@ parse_set_member_test_() ->
         ?_assertEqual({error, bad_response}, Parse(200, muc_ok(<<"setUserAffiliation">>, null))),
         ?_assertEqual({error, bad_response}, Parse(200, muc_error(<<"not_allowed">>))),
         ?_assertEqual({error, bad_response}, Parse(200, muc_error(<<"cannot_modify">>)))
+        | common_failures(Parse)
+    ].
+
+parse_set_none_test_() ->
+    Parse = fun geo_xmpp_admin:parse_set_none/2,
+    [
+        ?_assertEqual(ok, Parse(200, muc_ok(<<"setUserAffiliation">>, <<"User affiliation set">>))),
+        ?_assertEqual({error, room_not_found}, Parse(200, muc_error(<<"room_not_found">>))),
+        ?_assertEqual({error, bad_response}, Parse(200, muc_ok(<<"setUserAffiliation">>, null))),
+        ?_assertEqual({error, bad_response}, Parse(200, muc_error(<<"not_allowed">>)))
         | common_failures(Parse)
     ].
 

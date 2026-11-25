@@ -71,6 +71,7 @@ In production a reverse proxy (Caddy or nginx) terminates TLS and routes `/api` 
    - upserts the `rooms` document; returns `{cell, room_jid, neighbours?, places_nearby}`.
    - **discards lat/lng.**
    - **Phase 3f (ADR-020): makes the caller a `member` of the cell's members-only room before answering 200** (`geo_room_access:grant/3`, 8 s deadline): one admin call when the room is loaded, otherwise create (as the room-owner account), configure, owner leaves, set member. MongooseIM unavailable or too slow is 503, any other failure 500.
+   - **Phase 3f-2 (ADR-021): `geo_room_access:assign/3` wraps the grant in a per-user lock (`geo_membership`) and, after a successful grant, sets the affiliation of the user's previous cell room(s) to NONE (best effort, before the 200)**: the room kicks the user with status 321, the client treats that as part of moving. A revoke failure never changes the answer; it is retried on the user's next locate. No lock within the deadline is 503.
 4. The client validates the answer (exact equality with `g<precision>_<cell>@<muc domain>`) and joins `room_jid/nick` through `useAreaRoom` (it never creates a room; a join refused with `registration-required`/`not-allowed` locates once more and rejoins once, then offers "Try again": `useAccessRecovery`, ADR-020); it leaves the old room only after the new assignment has arrived. On failure or location loss it leaves and shows why (retry button, automatic backoff).
 
 ### Moving
@@ -102,6 +103,7 @@ geo_service_sup (one_for_one)
 │   ├── mc_pool_sup           # = geo_mongo_pool_sup: simple_one_for_one, TEMPORARY pool children (ADR-016 quirk 9)
 │   ├── geo_mongo             # mongodb-erlang topology (registered geo_mongo_topology)
 │   └── geo_mongo_probe       # pings Mongo every 5 s, publishes up/down in ETS (readiness), reaps abandoned heartbeat connections
+├── geo_membership            # owns ETS table: user JID → {current cell room, pending revokes}; per-user lock for /api/locate (ADR-021)
 ├── geo_rate                  # owns ETS table: user → {last_cell_centre, last_ts, tokens}
 ├── geo_room_sup (simple_one_for_one)
 │   └── geo_room  ×N          # one gen_server per active cell; idle timeout → stop
@@ -113,7 +115,7 @@ geo_service_sup (one_for_one)
 5 / period 10, started in that order); `geo_mongo_sup` (rest_for_one, intensity 5 / period 10) holds the driver's service
 processes, the topology and the readiness probe. The `mongodb` driver is an included application (loaded and shipped,
 never started), so its own supervision tree is replaced by ours and pool children are temporary; the other
-`geo_service_sup` children arrive in later slices. Mongo may be down at boot: the app
+`geo_service_sup` children arrive in later slices (`geo_membership` arrived in 3f-2). Mongo may be down at boot: the app
 still starts (degraded), `/api/ready` answers 503 and the driver reconnects by itself (ADR-016). The listener is embedded with `ranch:child_spec/5` (`cowboy_clear` protocol), so it lives
 under our supervisor and a crash restarts it; `cowboy:start_clear/3` is deliberately not used. JSON is encoded
 with OTP's stdlib `json` (OTP 27+, pinned 28.4.2; see ADR-015). `geo_config` is the only module that reads the application
@@ -123,7 +125,7 @@ before the supervisor and replaces the Mongo password, the MongooseIM admin pass
 `Authorization` header) and the JWT secret with `[REDACTED]` in every log event. Two patterns also catch secrets minted at
 run time: XMPP passwords (`xp1_` + 32 characters) and JWT-shaped strings.
 
-**Status (Phase 3c):** `POST /api/session` is live. `inets` (OTP `httpc`, default profile, per-request options only) is the
+**Status (Phase 3c):** `POST /api/session` is live. `inets` (OTP `httpc`; its own non-queuing profile since 3f-2, ADR-021) is the
 admin API client. New environment keys, validated by `geo_config:session/0` (key name only in errors): `JWT_SECRET`
 (32..512 printable ASCII, at least 10 distinct characters, not starting with `change-me`), `XMPP_DOMAIN`,
 `MONGOOSEIM_ADMIN_URL` (http only), `MONGOOSEIM_ADMIN_USER`, `MONGOOSEIM_ADMIN_PASSWORD`. `/api/ready` does not depend on
@@ -153,6 +155,14 @@ one deadline; `geo_http_locate` receives the admin client and the room-owner nam
 override `default_room`, so the slow path re-applies the constant config (`geo_xmpp_admin:room_config/0`). After a MongooseIM restart rooms are
 unloaded and joins get `not-allowed` until a locate loads them (`dev-seed.sh` does it for the lobby). Residuals (disco after restart, occupant
 counts, existence oracle) stay until opaque room names (slice 3g).
+
+**Status (Phase 3f-2):** moving revokes the old room (ADR-021). `geo_membership` (supervised gen_server, started before `geo_http`) owns the ETS table
+`geo_membership` (`{UserJid, Current, Pending}`, protected, read in the caller) and a per-user lock (FIFO, at most 4 waiters, holder monitored; different users
+never block each other). `geo_room_access:assign/3` runs acquire, grant, settle, revoke each (`geo_xmpp_admin:set_none/4`; an unloaded old room is loaded
+first), requeue failures, release, all under the locate's 8 s deadline. `revoke/3` only touches `g<5..7>_<geohash>` rooms of the MUC domain, never the lobby.
+The owner process never logs, wraps its callbacks so an exit reason is a bare atom, and implements `format_status/1` (counts only), because its state links users to
+rooms. Residual until slice 3f-3: a geo_service restart forgets the table (at most one stale membership per user who moves afterwards). The web client maps the
+room's 321 presence to `room-left` reason `removed` ("Moving you to your new area's chat…" without a button while a new room is pending, otherwise "Join again").
 
 `geohash` API (pure; no logging, no processes; matches `web/src/geo/geohash.ts`):
 
@@ -194,8 +204,9 @@ counts, existence oracle) stay until opaque room names (slice 3g).
 | `geo_auth` | Pure HS256 JWT issue/verify (HS256 only, constant-time signature check before the payload is parsed) |
 | `geo_nickname` | Pure nickname rules and the reserved list |
 | `geo_session` | Creates a session (reserve the nickname, register the XMPP account, activate, issue the JWT, roll back on failure) and renews one (`renew/3`: credential shape, active profile, admin `checkPassword`, JWT) |
-| `geo_xmpp_admin` | MongooseIM admin GraphQL client (`registerUser`, `removeUser`, `checkPassword`, and for MUC: `setUserAffiliation`, `createInstantRoom`, `changeRoomConfiguration`, `exitRoom`); constant documents, per-call timeout. Never logs bodies |
-| `geo_room_access` | `grant/3`: makes a user a `member` of a cell room before `/api/locate` answers (fast path 1 call; slow path create, configure, exit, set member); no processes; one deadline; logs one atom-only `room_access_failed` per failure |
+| `geo_xmpp_admin` | MongooseIM admin GraphQL client (`registerUser`, `removeUser`, `checkPassword`, and for MUC: `setUserAffiliation` MEMBER and NONE, `createInstantRoom`, `changeRoomConfiguration`, `exitRoom`); constant documents, per-call timeout; own `httpc` profile `geo_xmpp_admin` (no keep-alive queue, 8 sessions; started in `geo_service_app`, ADR-021). Never logs bodies |
+| `geo_room_access` | `assign/3` (what `/api/locate` calls): lock, `grant/3`, settle, revoke the previous room(s), requeue failures, release; `grant/3`: makes a user a `member` of a cell room before `/api/locate` answers (fast path 1 call; slow path create, configure, exit, set member); `revoke/3`: sets a cell room's affiliation to NONE (loads the room first when needed; refuses non-cell rooms); no processes; one deadline; logs atom-only `room_access_failed` / `room_revoke_failed` / `membership_tracking_failed` |
+| `geo_membership` | Supervised gen_server owning the user to current-room ETS table and the per-user locate lock (`acquire/2`, `release/1`, `settle/2`, `requeue/2`, `current/1`); pure `settle_entry/2`, `requeue_entry/3`; never logs user or room, `format_status/1` reduces the state to counts |
 | `geo_store` | All MongoDB access: rooms (`touch_room/1,2`, `get_room/1`) and profiles (`create_pending_profile/3`, `activate_profile/1`, `delete_profile/1`, `get_profile/1`); places and reports later. Takes cells, never coordinates |
 
 ### HTTP API (v1)

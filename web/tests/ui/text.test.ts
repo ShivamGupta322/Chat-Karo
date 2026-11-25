@@ -176,6 +176,13 @@ describe('area and dev-location text', () => {
     expect(text.length).toBeGreaterThan(0);
   });
 
+  it('has the move and removal lines', () => {
+    expect(AREA_TEXT.moving).toBe("Moving you to your new area's chat…");
+    expect(AREA_TEXT.removed).toBe(
+      "You're no longer in this area's chat. Nearby may be open in another tab.",
+    );
+  });
+
   it('has the left-room line', () => {
     expect(AREA_TEXT.left).toBe('You left the room');
   });

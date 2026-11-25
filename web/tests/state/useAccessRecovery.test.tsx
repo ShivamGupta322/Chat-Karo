@@ -84,6 +84,21 @@ describe('useAccessRecovery', () => {
     expect([...ACCESS_FAILURES].sort()).toEqual(['not-allowed', 'registration-required']);
   });
 
+  it("a removal (room-left 'removed') on the desired room is not an access failure: no refresh", () => {
+    const { result } = mount(R1);
+    setStatus(R1, 'joined');
+    act(() => {
+      useRoomStore.setState({ roomJid: R1, status: 'left', leftReason: 'removed', nick: 'alice' });
+    });
+    expect(refresh).not.toHaveBeenCalled();
+    expect(joinRoom).not.toHaveBeenCalled();
+    expect(result.current.phase).toBe('idle');
+    act(() => {
+      vi.advanceTimersByTime(60_000);
+    });
+    expect(refresh).not.toHaveBeenCalled();
+  });
+
   it.each(['registration-required', 'not-allowed'] as const)(
     '%s: exactly one refresh, then one joinRoom(desired, nick)',
     async (reason) => {

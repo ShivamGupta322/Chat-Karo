@@ -430,6 +430,53 @@ describe("occupants and leaving", () => {
     });
   });
 
+  it("self 301 emits room-left banned", () => {
+    const ctx = setup();
+    connect(ctx);
+    joined(ctx);
+    ctx.t.pushStanza(presence("alice", ["110", "301"], "unavailable"));
+    expect(ctx.events.at(-1)).toEqual({ type: "room-left", roomJid: ROOM, reason: "banned" });
+  });
+
+  it("321 for self without status 110 emits room-left removed, untracks, and sends nothing", () => {
+    // geo_service revoked the membership because the user moved (ADR-021); the room's kick
+    // presence has no status 110, so self is recognised by the nick.
+    const ctx = setup();
+    connect(ctx);
+    joined(ctx);
+    const sent = ctx.t.sent.length;
+    ctx.t.pushStanza(presence("alice", ["321"], "unavailable"));
+    expect(ctx.events.at(-1)).toEqual({ type: "room-left", roomJid: ROOM, reason: "removed" });
+    expect(ctx.t.sent).toHaveLength(sent);
+    const count = ctx.events.length;
+    ctx.t.pushStanza(presence("alice", ["110"]));
+    ctx.t.pushStanza(presence("bob"));
+    expect(ctx.events).toHaveLength(count);
+  });
+
+  it("321 for another occupant is only occupant-left", () => {
+    const ctx = setup();
+    connect(ctx);
+    joined(ctx);
+    ctx.t.pushStanza(presence("bob"));
+    ctx.t.pushStanza(presence("bob", ["321"], "unavailable"));
+    expect(ctx.events.at(-1)).toEqual({ type: "occupant-left", roomJid: ROOM, nick: "bob" });
+    expect(ctx.events.filter((e) => e.type === "room-left")).toEqual([]);
+  });
+
+  it("321 for self while joining is room-left removed, not a join failure", () => {
+    const ctx = setup();
+    connect(ctx);
+    ctx.client.joinRoom(ROOM, "alice");
+    ctx.t.pushStanza(presence("alice", ["321"], "unavailable"));
+    expect(ctx.events.at(-1)).toEqual({ type: "room-left", roomJid: ROOM, reason: "removed" });
+    expect(ctx.events.filter((e) => e.type === "room-join-failed")).toEqual([]);
+    // the join timer is gone too: nothing more happens
+    const count = ctx.events.length;
+    vi.advanceTimersByTime(60_000);
+    expect(ctx.events).toHaveLength(count);
+  });
+
   it("leaveRoom sends unavailable, emits room-left self, then ignores the room", () => {
     const ctx = setup();
     connect(ctx);

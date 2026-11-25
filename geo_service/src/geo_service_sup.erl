@@ -28,6 +28,15 @@ init(#{listen := Listen, mongo := Mongo, session := Session}) ->
             type => supervisor,
             modules => [geo_mongo_sup]
         },
+        %% ETS owner + per-user lock for "one cell-room membership per user" (ADR-021). Before
+        %% geo_http so the table exists when the first locate arrives.
+        #{
+            id => geo_membership,
+            start => {geo_membership, start_link, []},
+            restart => permanent,
+            shutdown => 5000,
+            type => worker
+        },
         geo_http:child_spec(Listen, Session)
     ],
     {ok, {SupFlags, Children}}.

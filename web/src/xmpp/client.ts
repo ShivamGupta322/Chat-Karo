@@ -395,6 +395,12 @@ export function createXmppClient(
       }
       return;
     }
+    if (p.kind === "unavailable" && isSelf && p.statusCodes.has("321")) {
+      // geo_service revoked the membership because the user moved (ADR-021): not a failure.
+      untrack(room);
+      emit({ type: "room-left", roomJid: room.roomJid, reason: "removed" });
+      return;
+    }
     if (p.kind === "unavailable" && isSelf) {
       // e.g. the room was destroyed mid-join; fail now instead of waiting for the join timer.
       failJoin(room, "other", "unavailable");
@@ -657,11 +663,16 @@ export function createXmppClient(
       }
       return;
     }
+    // 321 (affiliation change) comes from geo_service revoking the membership when the user
+    // moved to another area (ADR-021). The room's kick presence carries no status 110, so self is
+    // recognised by the nick.
     const reason: LeaveReason = p.statusCodes.has("307")
       ? "kicked"
       : p.statusCodes.has("301")
         ? "banned"
-        : "other";
+        : p.statusCodes.has("321")
+          ? "removed"
+          : "other";
     untrack(room);
     emit({ type: "room-left", roomJid: room.roomJid, reason });
   }

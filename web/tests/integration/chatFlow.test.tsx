@@ -1029,6 +1029,83 @@ describe('chat flow', () => {
         expect(joinsTo(t)).toEqual([`${CELL_ROOM}/alice`, `${CELL_ROOM_B}/alice`]);
       }, 20_000);
 
+      it('a removal while moving (ADR-021) says "moving", shows no button and no left-room line, and joins the new room once', async () => {
+        const gate = deferred<HttpResponseLike>();
+        const { t, requests } = mountApp({
+          stored: true,
+          routes: { [LOCATE_URL]: (req) => (req.body === BODY_B ? gate.promise : locateAnswer(req)) },
+        });
+        await signInAndJoin(t);
+        await pickSpotB();
+        const sent = t.sent.length;
+        act(() => {
+          t.pushStanza(presence('alice', ['321'], 'unavailable', CELL_ROOM));
+        });
+        expect(screen.getByText(AREA_TEXT.moving)).toHaveAttribute('role', 'status');
+        expect(screen.queryByRole('button', { name: AREA_TEXT.rejoin })).toBeNull();
+        expect(screen.queryByText(AREA_TEXT.left)).toBeNull();
+        expect(screen.queryByText(AREA_TEXT.removed)).toBeNull();
+        // Nothing is sent for the old room: the server already removed us.
+        expect(t.sent).toHaveLength(sent);
+        expect(joinsTo(t)).toEqual([`${CELL_ROOM}/alice`]);
+        expect(leavesTo(t)).toEqual([]);
+
+        gate.resolve(locateAnswer({ url: LOCATE_URL, body: BODY_B, headers: {}, signal: undefined }));
+        await settle();
+        expect(joinsTo(t)).toEqual([`${CELL_ROOM}/alice`, `${CELL_ROOM_B}/alice`]);
+        expect(leavesTo(t)).toEqual([]);
+        expect(locateRequests(requests)).toHaveLength(2);
+        act(() => {
+          t.pushStanza(presence('alice', ['110'], undefined, CELL_ROOM_B));
+        });
+        expect(screen.getByText(/You're in/)).toHaveTextContent("You're in Area u4pruye as alice");
+        expect(screen.queryByRole('button', { name: AREA_TEXT.rejoin })).toBeNull();
+        expect(locateRequests(requests)).toHaveLength(2);
+      }, 20_000);
+
+      it('a removal while settled says it, offers a keyboard-reachable "Join again", locates nothing by itself, and recovers once on a refused rejoin', async () => {
+        const { t, requests, timers } = mountApp({ stored: true });
+        const user = userEvent.setup({ delay: null });
+        await signInAndJoin(t);
+        act(() => {
+          t.pushStanza(presence('alice', ['321'], 'unavailable', CELL_ROOM));
+        });
+        const status = screen.getByText(AREA_TEXT.removed);
+        expect(status).toHaveAttribute('role', 'status');
+        expect(screen.queryByText(AREA_TEXT.left)).toBeNull();
+        expect(screen.queryByText(AREA_TEXT.moving)).toBeNull();
+        const rejoin = screen.getByRole('button', { name: AREA_TEXT.rejoin });
+        for (const s of screen.getAllByRole('status')) {
+          expect(within(s).queryByRole('button')).toBeNull();
+        }
+        for (let i = 0; i < 40 && document.activeElement !== rejoin; i += 1) await user.tab();
+        expect(document.activeElement).toBe(rejoin);
+
+        // Nothing happens by itself: no locate, no join.
+        await act(async () => {
+          await timers.advance(60_000);
+        });
+        await settle();
+        expect(locateRequests(requests)).toHaveLength(1);
+        expect(joinsTo(t)).toEqual([`${CELL_ROOM}/alice`]);
+
+        await user.click(rejoin);
+        expect(joinsTo(t)).toEqual([`${CELL_ROOM}/alice`, `${CELL_ROOM}/alice`]);
+        expect(document.activeElement).toBe(screen.getByText(AREA_TEXT.joining('Area u4pruyd')));
+        act(() => {
+          t.pushStanza(presenceError('registration-required', CELL_ROOM));
+        });
+        await settle();
+        // Exactly one refresh through the existing recovery, then one more join.
+        expect(locateRequests(requests)).toHaveLength(2);
+        expect(joinsTo(t)).toHaveLength(3);
+        act(() => {
+          t.pushStanza(presence('alice', ['110']));
+        });
+        expect(screen.getByText(/You're in/)).toHaveTextContent("You're in Area u4pruyd as alice");
+        expect(locateRequests(requests)).toHaveLength(2);
+      }, 30_000);
+
       it('(d) a newer pick aborts the pending request and ignores its late answer', async () => {
         const gate = deferred<HttpResponseLike>();
         const { t, requests } = mountApp({

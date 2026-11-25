@@ -11,6 +11,7 @@ start(_Type, _Args) ->
         {ok, Session} ?= geo_config:session(),
         %% The redaction filter must be in place before anything that holds the password starts.
         ok = geo_log_redact:install(secrets(Mongo, Session)),
+        ok ?= geo_xmpp_admin:start_http_profile(),
         %% The filter stays installed if the supervisor fails to start: the application
         %% controller logs the exit reason after this returns, and it could carry the password.
         %% It is uninstalled in stop/1 only.
@@ -19,11 +20,15 @@ start(_Type, _Args) ->
         {error, {bad_config, Key}} = Failure ->
             %% Key name only: never log the configured value.
             logger:error(#{event => bad_config, key => Key}),
+            Failure;
+        {error, httpc_profile} = Failure ->
+            logger:error(#{event => httpc_profile_failed}),
             Failure
     end.
 
 -spec stop(term()) -> ok.
 stop(_State) ->
+    _ = inets:stop(httpc, geo_xmpp_admin),
     geo_log_redact:uninstall().
 
 %% The mongo password, the MongooseIM admin password (and its base64 form in the Basic header)

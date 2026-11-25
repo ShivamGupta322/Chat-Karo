@@ -1,7 +1,14 @@
 {application, geo_service, [
     {description, "Nearby geo service: location to geohash cell to chat room"},
     {vsn, "0.1.0"},
-    {registered, [geo_service_sup, geo_mongo_sup, geo_mongo_topology, geo_mongo_probe, mc_pool_sup]},
+    {registered, [
+        geo_service_sup,
+        geo_mongo_sup,
+        geo_mongo_topology,
+        geo_mongo_probe,
+        mc_pool_sup,
+        geo_membership
+    ]},
     {mod, {geo_service_app, []}},
     {applications, [
         kernel, stdlib, crypto, public_key, ssl, inets, ranch, cowboy, bson, poolboy, pbkdf2

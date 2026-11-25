@@ -17,6 +17,14 @@
 %%   owner_missing createInstantRoom always answers user_not_found
 %%   configure_mismatch changeRoomConfiguration echoes publicList flipped
 %%   slow_room     every MUC operation answers after 7 s
+%%   none_503      setUserAffiliation with NONE (revoke) answers 503; everything else as ok
+%%   slow_member   setUserAffiliation with MEMBER answers after 1 s
+%%   {slow_for, UserJid} every MUC operation naming that user (set_member, set_none, exit)
+%%                 answers after 7 s; other users are served normally
+%% Affiliations are kept in ETS ({aff, Room, User}); set_member adds, set_none removes (room
+%% loaded) or answers room_not_found (not loaded). reset/0 unloads the rooms but keeps the
+%% affiliations, like a MongooseIM restart (persistent rooms keep their affiliations in the
+%% database). affs/1 lists a user's rooms.
 %% A successful register (modes ok, exists never registers) stores {{pw, Jid}, Password} so
 %% that checkPassword can answer: equal -> correct true, different -> correct false, no entry ->
 %% 200 user_does_not_exist whose message echoes the password (the shape probed live, which is
@@ -25,7 +33,7 @@
 -behaviour(cowboy_handler).
 
 -export([start/0, stop/0, port/0, stop_listener/0, start_listener/1]).
--export([set_mode/1, reset/0, reset_calls/0, calls/0, forget_user/1]).
+-export([set_mode/1, reset/0, reset_calls/0, calls/0, forget_user/1, affs/1]).
 -export([put_secret/1, secrets/0, log_event/1, log_events/0]).
 -export([init/2]).
 
@@ -90,8 +98,12 @@ port() -> ranch:get_port(?LISTENER).
     | room_unloaded
     | owner_missing
     | configure_mismatch
-    | slow_room.
--type op() :: register | remove | check | set_member | create | configure | exit | other.
+    | slow_room
+    | none_503
+    | slow_member
+    | {slow_for, UserJid :: binary()}.
+-type op() ::
+    register | remove | check | set_member | set_none | create | configure | exit | other.
 
 -spec set_mode(mode()) -> ok.
 set_mode(Mode) ->
@@ -104,7 +116,8 @@ reset_calls() ->
     ets:match_delete(?TABLE, {{call, '_'}, '_'}),
     ok.
 
-%% Forget the recorded requests and unload every room (not the secrets, log events or accounts).
+%% Forget the recorded requests and unload every room (not the affiliations, secrets, log
+%% events or accounts).
 -spec reset() -> ok.
 reset() ->
     ets:match_delete(?TABLE, {{call, '_'}, '_'}),
@@ -115,6 +128,11 @@ reset() ->
 
 calls() ->
     [Call || {{call, _}, Call} <- ets:tab2list(?TABLE)].
+
+%% The rooms (sorted) in which the user holds an affiliation.
+-spec affs(UserJid :: binary()) -> [binary()].
+affs(User) ->
+    lists:sort([Room || {{aff, Room, U}, _} <- ets:tab2list(?TABLE), U =:= User]).
 
 %% The account no longer exists in the fake.
 -spec forget_user(Jid :: binary()) -> ok.
@@ -171,8 +189,15 @@ operation(Query) ->
         {<<"exitRoom">>, exit}
     ],
     case [Op || {Name, Op} <- Names, binary:match(Query, Name) =/= nomatch] of
-        [Op] -> Op;
-        _ -> other
+        [set_member] ->
+            case binary:match(Query, <<"affiliation: NONE">>) of
+                nomatch -> set_member;
+                _ -> set_none
+            end;
+        [Op] ->
+            Op;
+        _ ->
+            other
     end.
 
 respond(unauthorized, _Op, _Vars, Req) ->
@@ -186,6 +211,24 @@ respond(slow_room, Op, Vars, Req) when
 ->
     timer:sleep(?SLOW_MS),
     respond(ok, Op, Vars, Req);
+respond({slow_for, Slow}, Op, #{<<"user">> := Slow} = Vars, Req) when
+    Op =:= set_member; Op =:= set_none; Op =:= exit
+->
+    timer:sleep(?SLOW_MS),
+    respond(ok, Op, Vars, Req);
+respond(none_503, set_none, _Vars, Req) ->
+    cowboy_req:reply(503, #{}, <<"upstream unavailable">>, Req);
+respond(slow_member, set_member, Vars, Req) ->
+    timer:sleep(1000),
+    respond(ok, set_member, Vars, Req);
+respond(_Mode, set_none, #{<<"room">> := Room, <<"user">> := User}, Req) ->
+    case ets:lookup(?TABLE, {room, Room}) of
+        [] ->
+            reply(200, gql_error(<<"room_not_found">>), Req);
+        [_] ->
+            true = ets:delete(?TABLE, {aff, Room, User}),
+            reply(200, muc_data(<<"setUserAffiliation">>, <<"User affiliation set">>), Req)
+    end;
 respond(_Mode, set_member, #{<<"room">> := Room, <<"user">> := User}, Req) ->
     case ets:lookup(?TABLE, {room, Room}) of
         [] ->

@@ -14,9 +14,11 @@
 %% propagate so that it answers 400/408/413, and those carry no body. There is no terminate/3
 %% on purpose (Cowboy would pass it {crash, Class, Reason}).
 %%
-%% After the rooms document is bumped, geo_room_access:grant/3 makes the caller a member of the
-%% cell's (members-only) room under an 8 s deadline, still inside the try (ADR-020): 200 only
-%% after membership; MongooseIM unreachable or too slow is 503, any other access failure 500.
+%% After the rooms document is bumped, geo_room_access:assign/3 makes the caller a member of the
+%% cell's (members-only) room under an 8 s deadline, still inside the try (ADR-020), and revokes
+%% the previous cell room's membership, best effort (ADR-021): 200 only after membership;
+%% MongooseIM unreachable, too slow, or the user's lock not obtained in time is 503, any other
+%% access failure 500. A failed revoke never changes the answer.
 %%
 %% Calls into geo_locate, geo_store and geo_room_access are fully qualified (the CT suite
 %% fault-injects them with meck). Nothing here logs the body, the request, the config, or a
@@ -116,7 +118,7 @@ guarded(Sub, Body, Req, #{muc_domain := MucDomain} = Cfg) ->
                     %% value is an unexpected state and goes to the catch.
                     {ok, Outcome} when Outcome =:= created; Outcome =:= updated ->
                         RoomJid = geo_cell:room_jid(Cell, MucDomain),
-                        case geo_room_access:grant(access_ctx(Cfg), RoomJid, user_jid(Sub, Cfg)) of
+                        case geo_room_access:assign(access_ctx(Cfg), RoomJid, user_jid(Sub, Cfg)) of
                             ok ->
                                 geo_http_reply:json_ordered(
                                     200, geo_locate:response(Cell, Range, MucDomain), Req
@@ -153,10 +155,13 @@ guarded(Sub, Body, Req, #{muc_domain := MucDomain} = Cfg) ->
     end.
 
 -spec access_ctx(cfg()) -> geo_room_access:ctx().
-access_ctx(#{admin := Admin, xmpp_domain := Domain, room_owner := Owner}) ->
+access_ctx(
+    #{admin := Admin, xmpp_domain := Domain, muc_domain := MucDomain, room_owner := Owner}
+) ->
     #{
         admin => Admin,
         xmpp_domain => Domain,
+        muc_domain => MucDomain,
         room_owner => Owner,
         deadline => erlang:monotonic_time(millisecond) + ?ACCESS_DEADLINE_MS
     }.

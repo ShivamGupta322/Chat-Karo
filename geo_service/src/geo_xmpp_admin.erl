@@ -1,5 +1,5 @@
 %% Client for the MongooseIM 6.2.1 admin GraphQL API (account.registerUser / removeUser /
-%% checkPassword; muc.setUserAffiliation / createInstantRoom / changeRoomConfiguration / exitRoom).
+%% checkPassword; muc.setUserAffiliation (MEMBER and NONE) / createInstantRoom / changeRoomConfiguration / exitRoom).
 %% The GraphQL documents are constants; every value travels in `variables`. Request and response
 %% bodies are never logged: the register request carries the new XMPP password, and the admin
 %% API echoes passwords in some responses (the checkPassword user_does_not_exist error message
@@ -8,7 +8,8 @@
 -module(geo_xmpp_admin).
 
 -export([register_user/4, register_user/5, remove_user/3, check_password/3]).
--export([set_member/4, create_room/5, configure_room/3, exit_room/5]).
+-export([set_member/4, set_none/4, create_room/5, configure_room/3, exit_room/5]).
+-export([start_http_profile/0]).
 -export([
     register_request/4,
     remove_request/3,
@@ -17,10 +18,12 @@
     parse_remove/3,
     parse_check_password/2,
     set_member_request/3,
+    set_none_request/3,
     create_room_request/4,
     configure_room_request/2,
     exit_room_request/4,
     parse_set_member/2,
+    parse_set_none/2,
     parse_create_room/3,
     parse_configure_room/2,
     parse_exit_room/2,
@@ -47,6 +50,11 @@
     "mutation SetMember($room: BareJID!, $user: JID!) "
     "{ muc { setUserAffiliation(room: $room, user: $user, affiliation: MEMBER) } }"
 >>).
+%% Revoke a membership (ADR-021): member -> none in a members-only room kicks the user (321).
+-define(SET_NONE_QUERY, <<
+    "mutation SetNone($room: BareJID!, $user: JID!) "
+    "{ muc { setUserAffiliation(room: $room, user: $user, affiliation: NONE) } }"
+>>).
 -define(CREATE_ROOM_QUERY, <<
     "mutation CreateRoom($room: BareJID!, $owner: JID!, $nick: ResourceName!) "
     "{ muc { createInstantRoom(room: $room, owner: $owner, nick: $nick) { jid } } }"
@@ -63,6 +71,8 @@
 >>).
 -define(TIMEOUT, 5000).
 -define(CONNECT_TIMEOUT, 2000).
+%% Dedicated httpc profile: see ADR-021. Never the default profile.
+-define(HTTPC_PROFILE, geo_xmpp_admin).
 
 -type admin() :: #{
     url := string(),
@@ -120,6 +130,19 @@ set_member(Admin, RoomJid, UserJid, Timeout) ->
     Result =
         case Sent of
             {ok, {Status, Body}} -> parse_set_member(Status, Body);
+            error -> {error, unavailable}
+        end,
+    log_failure(Result, Sent),
+    Result.
+
+%% Revoke the user's membership (affiliation NONE; loaded rooms only, a no-op when not a member).
+-spec set_none(admin(), RoomJid :: binary(), UserJid :: binary(), Timeout :: pos_integer()) ->
+    ok | {error, room_error()}.
+set_none(Admin, RoomJid, UserJid, Timeout) ->
+    Sent = send(set_none_request(Admin, RoomJid, UserJid), Timeout),
+    Result =
+        case Sent of
+            {ok, {Status, Body}} -> parse_set_none(Status, Body);
             error -> {error, unavailable}
         end,
     log_failure(Result, Sent),
@@ -185,6 +208,10 @@ check_password_request(Admin, Jid, Password) ->
 -spec set_member_request(admin(), binary(), binary()) -> request().
 set_member_request(Admin, RoomJid, UserJid) ->
     request(Admin, ?SET_MEMBER_QUERY, #{<<"room">> => RoomJid, <<"user">> => UserJid}).
+
+-spec set_none_request(admin(), binary(), binary()) -> request().
+set_none_request(Admin, RoomJid, UserJid) ->
+    request(Admin, ?SET_NONE_QUERY, #{<<"room">> => RoomJid, <<"user">> => UserJid}).
 
 -spec create_room_request(admin(), binary(), binary(), binary()) -> request().
 create_room_request(Admin, RoomJid, OwnerFullJid, Nick) ->
@@ -307,6 +334,11 @@ parse_set_member(200, Body) ->
 parse_set_member(Status, _Body) ->
     status_error(Status).
 
+%% Same answer shapes as set_member.
+-spec parse_set_none(Status :: non_neg_integer(), Body :: binary()) ->
+    ok | {error, room_error()}.
+parse_set_none(Status, Body) -> parse_set_member(Status, Body).
+
 %% 200 + the expected room jid -> ok; code "user_not_found" (owner account missing) ->
 %% owner_missing; any other code -> bad_response.
 -spec parse_create_room(Status :: non_neg_integer(), Body :: binary(), ExpectedRoomJid :: binary()) ->
@@ -388,7 +420,26 @@ error_code(_) -> undefined.
 -spec jid(binary(), binary()) -> binary().
 jid(Localpart, Domain) -> <<Localpart/binary, "@", Domain/binary>>.
 
-%% httpc default profile, per-request options only. Any failure to get an HTTP answer is
+%% Start the dedicated httpc profile. max_keep_alive_length 0 means a request is never queued
+%% behind another one on a kept-alive session, so one user's hung MongooseIM call cannot delay
+%% anyone else; max_sessions limits persistent connections only (overflow requests open one-off
+%% Connection: close connections).
+-spec start_http_profile() -> ok | {error, httpc_profile}.
+start_http_profile() ->
+    case inets:start(httpc, [{profile, ?HTTPC_PROFILE}]) of
+        {ok, _Pid} -> set_profile_options();
+        {error, {already_started, _Pid}} -> set_profile_options();
+        _ -> {error, httpc_profile}
+    end.
+
+-spec set_profile_options() -> ok | {error, httpc_profile}.
+set_profile_options() ->
+    case httpc:set_options([{max_keep_alive_length, 0}, {max_sessions, 8}], ?HTTPC_PROFILE) of
+        ok -> ok;
+        _ -> {error, httpc_profile}
+    end.
+
+%% Dedicated httpc profile, per-request options only. Any failure to get an HTTP answer is
 %% "unavailable"; the reason is dropped because it can embed request data.
 -spec send(request(), pos_integer()) -> sent().
 send({Url, Headers, ContentType, Body}, Timeout) ->
@@ -397,7 +448,15 @@ send({Url, Headers, ContentType, Body}, Timeout) ->
         {connect_timeout, min(?CONNECT_TIMEOUT, Timeout)},
         {autoredirect, false}
     ],
-    try httpc:request(post, {Url, Headers, ContentType, Body}, HttpOpts, [{body_format, binary}]) of
+    try
+        httpc:request(
+            post,
+            {Url, Headers, ContentType, Body},
+            HttpOpts,
+            [{body_format, binary}],
+            ?HTTPC_PROFILE
+        )
+    of
         {ok, {{_Version, Status, _Reason}, _RespHeaders, RespBody}} when is_binary(RespBody) ->
             {ok, {Status, RespBody}};
         _ ->

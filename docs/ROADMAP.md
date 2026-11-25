@@ -62,15 +62,18 @@ Carry-forward for the next slices (from the 2a/2a+ reviews):
 - [x] Lock down MUC: `default_room.public = false` (a public disco listing of geohash rooms would reveal
       which cells are active, a location leak) and restrict room creation to geo_service/admin
       (slice 3f-1, ADR-020, verified live 2026-11-23: members-only rooms, membership granted by `/api/locate`)
-- [ ] Slice 3f-2: revoke the old room's membership on move (supervised ETS owner of user → last room; set the old
+- [x] Slice 3f-2: revoke the old room's membership on move (supervised ETS owner of user → last room; set the old
       room to NONE after the new grant), and decide what to do with memberships already in `muc_room_aff`
+      (ADR-021, verified live 2026-11-25; none existed in dev, manual cleanup SQL in ADR-021)
+- [ ] Slice 3f-3: membership reconciliation on start (Mongo `rooms` × `listRoomAffiliations` → pending revokes), so a
+      geo_service restart no longer leaves one stale membership per user who moves afterwards (ADR-021 residual)
 - [ ] Slice 3g: opaque room names (keyed hash of the cell) to close the ADR-020 residuals: stored room names listed
       by disco after a MongooseIM restart, occupant counts via room disco#info, the room-existence oracle
 - [x] Slice 3e-1: `POST /api/session/renew` (server, ADR-019, verified live 2026-11-21)
 - [x] Slice 3e-2: client identity (Welcome, device credential, token manager; verified live 2026-11-21)
 - [x] Client switches to `/api/locate` for room assignment (3e-3: only the cell centre is sent, server-assigned rooms, ADR-019, verified live 2026-11-22)
 - **Demo:** rooms assigned by the server, recorded in MongoDB. Verified live 2026-11-22 (ADR-019 "Live evidence (3e-3)");
-  the phase closes once the MUC lockdown follow-ups (3f-2, 3g) land.
+  the phase closes once the MUC lockdown follow-ups (3f-3, 3g) land.
 
 Carry-forward from 3e-3:
 - Hidden-tab reconnects leave stream-management nick ghosts (`name-2`) until the old session times out. Resume the
@@ -88,6 +91,16 @@ Carry-forward from 3f-1 (ADR-020):
   "Joining…"); validate `XMPP_ROOM_OWNER` in `entrypoint.sh`; map a rejected `locate()` to `unavailable` in `roomAssigner`;
   drop the always-false `created` on `room-joined`; the dead 201 branch in `tools/xmpp-smoke`; stream-management ghosts
   inflate occupant counts and hold nicknames.
+
+Carry-forward from 3f-2 (ADR-021):
+- Phase 4: expire the last membership N hours after the last locate (tracker rows need timestamps; supervised worker) and
+  bound the `geo_membership` ETS table; idle `deleteRoom` must drop the room from every tracker entry (else load-to-revoke
+  recreates it); align `geo_rate` with the tracker.
+- Any account-deletion flow must revoke memberships before `removeUser` (MongooseIM 6.2.1 keeps MUC affiliations).
+- MongooseIM `loglevel` must stay `warning` or stricter (at info it logs user JID + room on affiliation changes).
+- Re-apply the admin httpc profile options when inets restarts its `httpc_manager`; add
+  `geo_xmpp_admin:stop_http_profile/0` so the profile name lives in one place; a unit test with a raising `settle/2`.
+- Investigate the intermittent `mc_server` noproc crash report seen once by `logs_contain_no_coordinates` (round 1 of 3f-2).
 
 ## Phase 4 — Room lifecycle & movement
 - [ ] `geo_room` process per active cell with idle shutdown under `geo_room_sup`

@@ -61,6 +61,11 @@ export function Chat({
   // The room's own cell, so the label stays correct while a switch is pending.
   const label = assignment.room ? AREA_TEXT.areaLabel(assignment.room.cell) : "";
   const reconnecting = connection.status === "reconnecting";
+  // geo_service took the membership away because the user moved (ADR-021). While the new room is
+  // being assigned that is part of moving, not a failure: no button, nothing to retry.
+  const removed =
+    current && room.status === "left" && room.leftReason === "removed";
+  const moving = removed && assignment.status === "assigning";
   const accessDenied =
     current &&
     room.status === "failed" &&
@@ -88,13 +93,21 @@ export function Chat({
       statusLine = accessDenied
         ? AREA_TEXT.accessDenied
         : describeJoinFailure(room.failure.reason);
-    } else if (room.status === "left") statusLine = AREA_TEXT.left;
+    } else if (room.status === "left")
+      statusLine = moving
+        ? AREA_TEXT.moving
+        : removed
+          ? AREA_TEXT.removed
+          : AREA_TEXT.left;
     else if (room.status === "reconnecting")
       statusLine = CONNECTION_TEXT.roomReconnecting;
   }
 
   const showRejoin =
-    !recovering && current && (room.status === "failed" || room.status === "left");
+    !recovering &&
+    !moving &&
+    current &&
+    (room.status === "failed" || room.status === "left");
   const statusRef = useRef<HTMLParagraphElement>(null);
   const rejoinFocused = useRef(false);
   const hadRejoin = useRef(false);

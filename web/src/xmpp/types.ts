@@ -46,7 +46,7 @@ export type JoinFailure =
   | 'invalid-nick'
   | 'other';
 
-export type LeaveReason = 'self' | 'kicked' | 'banned' | 'disconnected' | 'other';
+export type LeaveReason = 'self' | 'kicked' | 'banned' | 'removed' | 'disconnected' | 'other';
 
 /** initial: newest page after a first join; gap: catching up after a reconnect; earlier: "Load earlier messages". */
 export type HistoryDirection = 'initial' | 'gap' | 'earlier';
